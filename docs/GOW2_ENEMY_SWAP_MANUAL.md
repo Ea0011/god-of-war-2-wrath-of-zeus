@@ -1,0 +1,164 @@
+# GoW2 (PS2) Enemy Swap Manual
+
+Repo: `/Users/eavagyan/wadder`. Verified on the NTSC GoW2 ISO (`GoW2.iso`, 8.5 GB, dual layer,
+files in `PART1.PAK`/`PART2.PAK` indexed by `GODOFWAR.TOC`).
+
+## 1. File map
+
+| path | what |
+|------|------|
+| `GoW2.iso` | the game. Only god_of_war_browser writes to it. |
+| `god_of_war_browser/` | mogaika's browser (Go). Serves the ISO on :8000, can replace pack files. |
+| `scripts/gow2_enemy_swap.py` | WAD reader/writer, DC_WAD decoder, swap tool, `apply_plan()` API. |
+| `scripts/gow2_swap_ui.py`, `scripts/gow2_swap_ui.html` | per-encounter swap web UI on :8787. |
+| `scripts/start_swap_ui.sh` | starts browser + UI. |
+| `docs/GOW2_DC_WAD_FORMAT.md` | long-form format notes. |
+| `sample_levels/*.WAD`, `cache/wads/*.WAD` | level WADs pulled from the ISO. |
+| `cache/index.json` | scan result: creature -> `R_*.WAD`, spawn behaviours, donor pool blocks per level. |
+| `backups/<NAME>.WAD.orig` | originals saved before the first upload of that level. |
+| `out/*.WAD` | generated levels (`<LEVEL>.mod.WAD` from the UI, named files from the CLI). |
+| `server.log`, `ui.log` | browser and UI logs. |
+
+## 2. Running the browser and the UI
+
+```bash
+# 0. close PCSX2; make sure nothing has the ISO open
+lsof GoW2.iso; hdiutil info | grep -A3 GoW2.iso   # detach with: hdiutil detach /dev/diskN
+# 1. everything at once (browser :8000 + UI :8787)
+scripts/start_swap_ui.sh
+# or by hand
+(cd god_of_war_browser && go run . -iso ../GoW2.iso -ps ps2 -gowversion 2 >> ../server.log 2>&1 &)
+python3 scripts/gow2_swap_ui.py --browser http://localhost:8000 --port 8787
+# 2. open http://localhost:8787
+# 3. when done, stop both so the emulator can open the ISO
+pkill -f gow2_swap_ui.py; pkill -f "go run . -iso"; lsof GoW2.iso || echo free
+```
+
+If `server.log` says `Failed to open iso in rw mode, trying ro mode`, something else has the ISO
+open; uploads will fail until it is closed and the browser restarted.
+
+Useful browser endpoints (all used by the UI):
+
+| endpoint | purpose |
+|----------|---------|
+| `GET /json/pack` | list of files in the TOC |
+| `GET /json/pack/<FILE>` | tag list of a WAD (Id, Tag, Size, Name) |
+| `GET /dump/pack/<FILE>` | the whole file |
+| `GET /dump/pack/<FILE>/<tagId>` | one tag payload |
+| `POST /upload/pack/<FILE>` (form field `data`) | replace a file: written into free pak space, TOC updated |
+
+### UI workflow
+
+1. **Scan creatures & donor levels** (once; ~1 min; cached in `cache/index.json`). Reads every
+   `R_*.WAD` top-level template list (creature name from `CRT_*`, behaviours from `BRA_*`) and
+   every level's RSRCS + pool blocks (donors).
+2. **Load** a level. The page shows RSRCS creatures with their N (pool size), and the encounters:
+   every spawner entity grouped by `ESC_*` script with its creature and behaviours.
+3. Pick a replacement per entity, or per whole script. Creatures without a donor block are
+   disabled. Behaviours missing in the new creature are highlighted and mapped to the fallback
+   (`BRA_Spawn`). Change N in the creature pills to rescale pools.
+4. **Preview** (dry run), **Write .mod.WAD only** (to `out/`), or **Apply & upload into ISO**
+   (backs up the original on first use, uploads, re-downloads and compares SHA-256).
+5. **Restore original from backup** uploads `backups/<LEVEL>.orig`.
+
+Creatures that still have at least one spawner stay in RSRCS; unreferenced ones are removed
+unless the checkbox is cleared.
+
+### CLI
+
+```bash
+python3 scripts/gow2_enemy_swap.py dump LEVEL.WAD [--names OTHER.WAD ...]
+python3 scripts/gow2_enemy_swap.py swap LEVEL.WAD --old Rhsold00 --new Satyr10 --donor ATLAS220.WAD \
+        [--count N] [--rename BRA_SpawnJump=BRA_Spawn ...] -o out/LEVEL_x.WAD
+python3 scripts/gow2_enemy_swap.py selftest LEVEL.WAD ...        # byte-identical round trips
+curl -F data=@out/LEVEL_x.WAD http://localhost:8000/upload/pack/LEVEL.WAD
+```
+`swap` replaces one creature everywhere; use the UI (or `apply_plan()`) for partial swaps.
+
+## 3. Format reference
+
+### 3.1 WAD container
+Records of `u16 tagType, u16 flags, u32 size, char name[24]` (32 bytes) + payload padded to 16.
+Tag types: `0x00 EntityCount` (no payload, `size` = number of ESC entities), `0x01` server
+instance (models, textures, scripts...), `0x02/0x03` group start/end, `0x12 RSRCS`,
+`0x0b..0x10 DC_WAD_<level>`, `0x15/0x13/0x16` WAD header/pop/footer.
+
+### 3.2 RSRCS (tag 0x12)
+Payload = N x 24-byte zero-padded creature names, e.g. `Colsus00`, `Rhsold00`, `Orders10`.
+The engine streams `R_<NAME upper-cased>.WAD` for each.
+
+### 3.3 DC_WAD tags (the "tweak" container)
+| tag | content |
+|-----|---------|
+| 0x0b | 4 bytes `32 CB 08 4A` (format id) |
+| 0x0c | data blob: typed objects back to back |
+| 0x0d | `u32 n; {u32 blobOff, u32 strOff} x n; strings` top-level named objects (`WAD_<level>`, `IO_*`, `BRK_*`, in enemy WADs `CRT_*`, `BRA_*`, `ORBE_*`) |
+| 0x0e | same pairs: field offset -> external template name to import (`CSH_*`, `FFB_*`, `ORBE_*`); `00000000` when empty |
+| 0x0f | `u32 n; {u32 hash, u32 strOff} x n; strings`, sorted by hash. Debug only (RHOD10 ships a broken one). |
+| 0x10 | `u32 n; {u32 blobOff, u32 strOff, u32 typeId} x n; strings` every field with its type |
+
+Hash: `h = 0; for c in NAME.upper(): h = (h*127 + c) mod 2^32`.
+Examples: `goSatyr10 -> 0x5cb60656`, `goRhsold00 -> 0x5b8941f2`, `goOrders02 -> 0x28b4020f`.
+
+`WAD_<level>` object (typeId 0xe5), little endian:
+```
+u32 a = nGO ? 0x8000|nGO : 0
+u32 b = (nGO<<15) | 0x4000 | nMem
+nGO  x tGOPool     {u32 hash(goXxx),  u32 count}   typeId 0xe3
+nMem x tMemoryPool {u32 hash(system), u32 count}   typeId 0xe4
+```
+`tGOPool_N` / `tMemoryPool_N` numbers in tag 0x10 are one running index in generation order,
+which exposes each creature's block: `[go<Creature>, its stone/frozen variants, spawn hole,
+death parts, FX...] [odbEffect, hfsmEnemy1, goSoldier, tAnimSystem, tMoveSystem, tFightSystem,
+tStandardEffectSystem, hfsmBreakable, tHandleSystem, goIO, hfsmIO_Misc, tMove, fxBoneData]`.
+All counts are multiples of N except `fxBoneData` = 1. The creature's own `R_*.WAD` does not
+list this block; copy it from a donor level (the index knows donors for 98 creatures).
+
+### 3.4 ESC spawner scripts (`SCR_Entities`)
+Tag payload: 0x24-byte header (`04 00 01 00 "SCR_Entities"`), then entities:
+```
+0x00 float matrix[16]   0x44 u16 entitySize   0x46 type   0x48 uid   0x4a physObj
+0x4e u16 handlersCount  0x50 u16 targetCount  0x52 u16 streamSize
+0x54 {u16 id, u16 start} x handlers; u16 targets[]; u16 0; opcodes...; strings...; entityName; pad to 4
+```
+Opcode `0x0e <u16 off>` pushes the string at `off` relative to the first opcode byte.
+Operand sizes: `0x00/0x01` 4, `0x02..0x10` 2, `0x11..0x39` none, `>=0x3a` exit.
+Spawners push `"BRA_<behaviour>"` then `"CRT_<Creature>"`. `BRA_*` must exist in the creature's
+WAD (tag 0x0d). Every creature has `BRA_Spawn`, `BRA_StonePose`, `BRA_DeathAir*`; extra ones
+(`BRA_SpawnJump`, `BRA_SpawnCeiling`, `BRA_Door*`, `BRA_ColossusToss`...) are creature specific.
+
+## 4. Manual hex edits
+
+Only sensible when sizes do not change: same-or-shorter creature name and the same number of
+pool entries. Otherwise every offset table after the change must be recomputed (use the tool).
+Worked example on the original `backups/RHOD10.WAD.orig` (6,174,720 bytes), Rhsold00 -> Satyr10:
+
+| what | file offset | edit |
+|------|-------------|------|
+| `RSRCS` payload (tag 6814) | `0x5CA860`, 72 bytes = 3 names | bytes `0x5CA878..0x5CA88F` hold `Rhsold00`; write `Satyr10` + 17 zero bytes |
+| DC 0x0c payload (tag 6824) | `0x5E0560`, 4236 bytes | |
+| `WAD_rhod10` object | `0x5E0F70` | header `27 80 00 00 2E C0 13 00` = nGO 39, nMem 46 (only touch if entry count changes) |
+| Rhsold00 GO block | `0x5E1060..0x5E1098` (7 entries) | first entry `F2 41 89 5B 10 00 00 00` = goRhsold00 x16 -> `56 06 B6 5C 10 00 00 00` = goSatyr10 x16; replace the other 6 hashes with the satyr objects (goStoneSatyr10 `A1 82 A0 AB` x32, goFreezeSatyr10 `5F A4 30 37` x16, goSpawnHole `33 4A 25 5B`, goDeathParts `B4 4E 95 71`, goSatEyeGlow `60 5E B6 7D`, goSATdecapT `E1 07 DD D6` ...). Satyr has 9 GO entries vs 7, so a true in-place edit must drop two (decapV, goGenericBlockS) or you need the tool. |
+| Rhsold00 MEM block | `0x5E1128..0x5E1198` (14 entries) | satyr needs 13 of the same systems (no ConcussionInstanceData); counts 16/32/48 stay. |
+| 0x0f names | `0x5E18F0` | optional, debug only |
+| spawner string | tag 654 `ESC_gotroomaistarters50`, payload `0xB6DE0`; `CRT_Rhsold00` at `0xB6E94` | overwrite with `CRT_Satyr10\0` (12 bytes incl. terminator; 1 byte shorter is fine). The `0x0e` operand at payload+0xB0 keeps pointing at the same offset. Repeat for every spawner (see `dump` output: 40 entities in 12 scripts). |
+
+Rules of thumb for hand edits:
+- Never change a tag's `size` unless you also move everything after it and keep 16-byte padding.
+- Pool entry = 8 bytes; hashes are little endian; count is the max simultaneous instances.
+- If a spawner's `BRA_*` does not exist in the new creature, overwrite it with `BRA_Spawn` (pad with zeros).
+- After editing, run `python3 scripts/gow2_enemy_swap.py dump FILE` to confirm RSRCS, blocks and spawners agree.
+
+## 5. Known data points
+
+- Donors: Satyr10 in ATLAS220 (N=2), ISLE45; Orders02 in ATLAS230 (N=5), ATLAS235 (N=6);
+  Harpy20/Captan10 in ATLAS230; Rhsold00 (N=16) + Colsus00 in RHOD10. Full list: `cache/index.json`.
+- RHOD10 lists Orders10 in RSRCS and spawns `CRT_Orders10` twice without a goOrders10 pool.
+- Enemy WAD sizes (payload): R_RHSOLD00 557 KB, R_SATYR10 809 KB, R_ORDERS10 862 KB, R_COLSUS00 3.0 MB.
+- In-game result: RHOD10 Rhsold00 -> Satyr10 (N=16, soldier behaviours -> BRA_Spawn) worked first try.
+
+## 6. Troubleshooting
+- `no donor pool block known`: scan again or pull a level that uses the creature.
+- Upload 500 / `Cannot find file`: wrong file name (case matters, e.g. `RHOD10.WAD`).
+- Readback mismatch: the ISO was read-only; close the emulator, restart the browser.
+- Game hangs on load after a swap: lower N (`--count`), or choose a smaller creature.

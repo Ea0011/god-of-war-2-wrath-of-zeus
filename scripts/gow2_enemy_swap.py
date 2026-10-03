@@ -1,0 +1,713 @@
+#!/usr/bin/env python3
+"""
+gow2_enemy_swap.py - decode God of War II (PS2) level WADs and swap one enemy type
+for another.
+
+Three places in a level WAD know which enemies the level uses:
+
+  1. RSRCS tag (0x12)      list of 24-byte names -> enemy WADs to load (R_<NAME>.WAD)
+  2. DC_WAD_* tags (0x0b..0x10)   the level "tweak" container.  Its WAD_<level> object
+                           holds the object pools (tGOPool_N: hash(goXxx) -> count) and
+                           memory pools (tMemoryPool_N: hash(system) -> count).  Without
+                           a pool for goOrders02 (and its helper objects) the engine can
+                           not instantiate the creature even if R_ORDERS02.WAD is loaded.
+  3. ESC_* SCR_Entities scripts   spawners push the strings "CRT_<Enemy>" and "BRA_<Spawn
+                           behaviour>" on the script stack.
+
+Usage:
+  gow2_enemy_swap.py dump  LEVEL.WAD
+  gow2_enemy_swap.py swap  LEVEL.WAD --old Satyr10 --new Orders02 --donor LEVEL_WITH_ORDERS.WAD
+                           [--count N] [--rename BRA_SpawnCeiling=BRA_Spawn ...] -o OUT.WAD
+  gow2_enemy_swap.py selftest LEVEL.WAD...      (round-trip the WAD writer and DC serializers)
+"""
+import argparse
+import struct
+import sys
+
+M32 = 0xFFFFFFFF
+TYPE_GOPOOL, TYPE_MEMPOOL, TYPE_WADOBJ = 0xE3, 0xE4, 0xE5
+
+
+# ----------------------------------------------------------------------------- helpers
+def ghash(s: str) -> int:
+    """Engine string hash used by DC_WAD: h = h*127 + c over the UPPER-CASED name."""
+    h = 0
+    for c in s.upper().encode('latin1'):
+        h = (h * 127 + c) & M32
+    return h
+
+
+def zstr(b, o):
+    e = b.index(b'\0', o)
+    return b[o:e].decode('latin1')
+
+
+def u16(b, o):
+    return struct.unpack_from('<H', b, o)[0]
+
+
+def u32(b, o):
+    return struct.unpack_from('<I', b, o)[0]
+
+
+def align(x, a):
+    return (x + a - 1) // a * a
+
+
+# ----------------------------------------------------------------------------- WAD I/O
+class Tag:
+    __slots__ = ('tag', 'flags', 'size', 'name', 'data')
+
+    def __repr__(self):
+        return f'Tag({self.tag:#x},{self.name!r},{self.size})'
+
+
+def read_wad(path):
+    d = open(path, 'rb').read()
+    pos, tags = 0, []
+    while pos + 32 <= len(d):
+        t = Tag()
+        t.tag, t.flags, t.size = struct.unpack_from('<HHI', d, pos)
+        t.name = d[pos + 8:pos + 32].split(b'\0')[0].decode('latin1')
+        pos += 32
+        if t.tag == 0:              # EntityCount: size field is a count, no payload
+            t.data = None
+        else:
+            t.data = d[pos:pos + t.size]
+            pos += t.size
+        pos = align(pos, 16)
+        tags.append(t)
+    return tags
+
+
+def write_wad(tags):
+    out = bytearray()
+    for t in tags:
+        size = t.size if t.data is None else len(t.data)
+        out += struct.pack('<HHI', t.tag, t.flags, size)
+        nb = t.name.encode('latin1')[:24]
+        out += nb + b'\0' * (24 - len(nb))
+        if t.data is not None:
+            out += t.data
+            out += b'\0' * (align(len(out), 16) - len(out))
+    return bytes(out)
+
+
+# ----------------------------------------------------------------------------- DC_WAD
+def parse_pairs(b):
+    n = u32(b, 0)
+    return [(u32(b, 4 + 8 * i), zstr(b, u32(b, 8 + 8 * i))) for i in range(n)]
+
+
+def build_pairs(pairs):
+    n = len(pairs)
+    out = bytearray(struct.pack('<I', n))
+    strs = bytearray()
+    for off, name in pairs:
+        out += struct.pack('<II', off, 4 + 8 * n + len(strs))
+        strs += name.encode('latin1') + b'\0'
+    out += strs
+    out += b'\0' * (align(len(out), 4) - len(out))
+    return bytes(out)
+
+
+def parse_fields(b):
+    n = u32(b, 0)
+    return [list(struct.unpack_from('<III', b, 4 + 12 * i)) for i in range(n)]  # off, nameoff, type
+
+
+def fields_named(b):
+    return [(off, zstr(b, no), ty) for off, no, ty in parse_fields(b)]
+
+
+def build_fields(fields):
+    """fields: list of (off, name, type)"""
+    n = len(fields)
+    out = bytearray(struct.pack('<I', n))
+    strs = bytearray()
+    for off, name, ty in fields:
+        out += struct.pack('<III', off, 4 + 12 * n + len(strs), ty)
+        strs += name.encode('latin1') + b'\0'
+    out += strs
+    out += b'\0' * (align(len(out), 4) - len(out))
+    return bytes(out)
+
+
+def parse_hashes(b):
+    """hash -> name.  Some shipped tables (e.g. RHOD10) have misaligned string offsets and
+    duplicate strings, so names are recovered by re-hashing every string in the string area
+    and only trusted when the hash matches; unmatched hashes keep whatever the offset says."""
+    n = u32(b, 0)
+    area = b[4 + 8 * n:]
+    byhash = {ghash(s.decode('latin1')): s.decode('latin1') for s in area.split(b'\0') if s}
+    for s in KNOWN_NAMES:
+        byhash.setdefault(ghash(s), s)
+    out = {}
+    for i in range(n):
+        h, o = u32(b, 4 + 8 * i), u32(b, 8 + 8 * i)
+        name = zstr(b, o) if o < len(b) else ''
+        if ghash(name) != h:
+            name = byhash.get(h, name)
+        out[h] = name
+    return out
+
+
+KNOWN_NAMES = set()
+
+
+def learn_names(b):
+    """remember every string of a hash table so other tables can resolve the same hashes."""
+    n = u32(b, 0)
+    for s in b[4 + 8 * n:].split(b'\0'):
+        if s:
+            KNOWN_NAMES.add(s.decode('latin1'))
+
+
+def build_hashes(hm):
+    items = sorted(hm.items())            # table is sorted by hash (binary search)
+    n = len(items)
+    out = bytearray(struct.pack('<I', n))
+    strs = bytearray()
+    for h, name in items:
+        out += struct.pack('<II', h, 4 + 8 * n + len(strs))
+        strs += name.encode('latin1') + b'\0'
+    out += strs
+    out += b'\0' * (align(len(out), 4) - len(out))
+    return bytes(out)
+
+
+class DC:
+    def __init__(self, tags):
+        self.ti = {}
+        for i, t in enumerate(tags):
+            if t.name.startswith('DC_') and 0x0B <= t.tag <= 0x10:
+                self.ti[t.tag] = i
+        if set(self.ti) != set(range(0x0B, 0x11)):
+            raise SystemExit('DC_WAD tags 0x0b..0x10 not all present')
+        self.tags = tags
+        self.blob = bytes(tags[self.ti[0x0C]].data)
+        self.fields = fields_named(tags[self.ti[0x10]].data)
+        self.top = parse_pairs(tags[self.ti[0x0D]].data)
+        self.imports = parse_pairs(tags[self.ti[0x0E]].data)
+        learn_names(tags[self.ti[0x0F]].data)
+        self.hashes = parse_hashes(tags[self.ti[0x0F]].data)
+
+    def name_of(self, h):
+        return self.hashes.get(h, '@hash(%08x)' % h)
+
+    def pools(self):
+        res = []
+        for fi, (off, name, ty) in enumerate(self.fields):
+            if ty in (TYPE_GOPOOL, TYPE_MEMPOOL):
+                h, c = struct.unpack_from('<II', self.blob, off)
+                res.append(dict(idx=int(name.rsplit('_', 1)[1]), kind='go' if ty == TYPE_GOPOOL else 'mem',
+                                fi=fi, off=off, hash=h, count=c, name=self.name_of(h)))
+        return res
+
+    def wad_field(self):
+        for fi, f in enumerate(self.fields):
+            if f[2] == TYPE_WADOBJ:
+                return fi
+        raise SystemExit('no WAD_<level> object (type 0xe5) in DC_WAD')
+
+    def store(self):
+        """write parsed tables back into the tag list (blob is written by caller)."""
+        self.tags[self.ti[0x0C]].data = bytes(self.blob)
+        self.tags[self.ti[0x10]].data = build_fields(self.fields)
+        self.tags[self.ti[0x0D]].data = build_pairs(self.top)
+        self.tags[self.ti[0x0E]].data = build_pairs(self.imports)
+        self.tags[self.ti[0x0F]].data = build_hashes(self.hashes)
+
+
+def enemy_block(pools, enemy):
+    """Return (go_entries, mem_entries) that the level generator emitted for `enemy`.
+
+    tGOPool_N / tMemoryPool_N numbers are one global sequence in generation order:
+    [enemy GO pools...][enemy memory pools...].  The block starts at the go<Enemy> entry."""
+    target = ghash('go' + enemy)
+    seq = sorted(pools, key=lambda p: p['idx'])
+    starts = [k for k, p in enumerate(seq) if p['kind'] == 'go' and p['hash'] == target]
+    if not starts:
+        return None, None
+    k = starts[0]
+    go, mem = [], []
+    while k < len(seq) and seq[k]['kind'] == 'go':
+        go.append(seq[k]); k += 1
+    while k < len(seq) and seq[k]['kind'] == 'mem':
+        mem.append(seq[k]); k += 1
+    return go, mem
+
+
+def scale_block(block, n_donor, n_new):
+    out = []
+    for p in block:
+        c = p['count']
+        if p['name'] != 'fxBoneData' and n_donor and c % n_donor == 0:
+            c = c // n_donor * n_new
+        out.append((p['hash'], c, p['name']))
+    return out
+
+
+def wad_header(n_go, n_mem):
+    a = (0x8000 | n_go) if n_go else 0
+    b = (n_go << 15) | 0x4000 | n_mem
+    return struct.pack('<II', a, b)
+
+
+def rebuild_pools(dc, old_go, old_mem, new_go, new_mem):
+    """Replace one enemy's pool block in the DC blob and fix every table that holds offsets."""
+    wfi = dc.wad_field()
+    woff = dc.fields[wfi][0]
+    a, b = struct.unpack_from('<II', dc.blob, woff)
+    n_go_old, n_mem_old = a & 0x7FFF, b & 0x3FFF
+    assert wad_header(n_go_old, n_mem_old) == dc.blob[woff:woff + 8], 'unexpected WAD object header'
+    pools = dc.pools()
+    go_list = sorted([p for p in pools if p['kind'] == 'go'], key=lambda p: p['off'])
+    mem_list = sorted([p for p in pools if p['kind'] == 'mem'], key=lambda p: p['off'])
+    assert len(go_list) == n_go_old and len(mem_list) == n_mem_old
+    old_tail = woff + 8 + 8 * (n_go_old + n_mem_old)
+
+    def splice(lst, old, new):
+        if not old:
+            return [dict(hash=h, count=c, name=n, idx=None) for h, c, n in new] + lst
+        i = lst.index(old[0]); j = lst.index(old[-1]) + 1
+        assert lst[i:j] == old, 'enemy pool block is not contiguous'
+        return lst[:i] + [dict(hash=h, count=c, name=n, idx=None) for h, c, n in new] + lst[j:]
+
+    go_new = splice(go_list, old_go, new_go)
+    mem_new = splice(mem_list, old_mem, new_mem)
+
+    # renumber tGOPool_N / tMemoryPool_N in generation order (old idx order, new block in place)
+    seq = sorted(pools, key=lambda p: p['idx'])
+    old_block = old_go + old_mem
+    if old_block:
+        i = seq.index(old_block[0])
+        seq = seq[:i] + [None] * 1 + [p for p in seq if p not in old_block][i:]
+    else:
+        seq = [None] + seq
+    newblock = [p for p in go_new if p['idx'] is None] + [p for p in mem_new if p['idx'] is None]
+    merged = []
+    for p in seq:
+        merged.extend(newblock if p is None else [p])
+    for n, p in enumerate(merged):
+        p['newidx'] = n
+
+    # blob
+    body = bytearray()
+    for p in go_new:
+        body += struct.pack('<II', p['hash'], p['count'])
+    for p in mem_new:
+        body += struct.pack('<II', p['hash'], p['count'])
+    new_blob = dc.blob[:woff] + wad_header(len(go_new), len(mem_new)) + bytes(body) + dc.blob[old_tail:]
+    delta = len(new_blob) - len(dc.blob)
+
+    # field table
+    newfields = [f for f in dc.fields if f[0] < woff]
+    newfields.append((woff, dc.fields[wfi][1], TYPE_WADOBJ))
+    o = woff + 8
+    for p in go_new:
+        newfields.append((o, f"tGOPool_{p['newidx']}", TYPE_GOPOOL)); o += 8
+    for p in mem_new:
+        newfields.append((o, f"tMemoryPool_{p['newidx']}", TYPE_MEMPOOL)); o += 8
+    for off, name, ty in dc.fields:
+        if off >= old_tail:
+            newfields.append((off + delta, name, ty))
+    dc.fields = newfields
+    dc.top = [(off + delta if off >= old_tail else off, n) for off, n in dc.top]
+    dc.imports = [(off + delta if off >= old_tail else off, n) for off, n in dc.imports]
+
+    # hash -> name table: add new names, drop names no longer referenced anywhere in the blob
+    for h, c, n in new_go + new_mem:
+        dc.hashes[h] = n
+    dc.hashes = {h: n for h, n in dc.hashes.items() if struct.pack('<I', h) in new_blob}
+    dc.blob = new_blob
+    return delta
+
+
+# ----------------------------------------------------------------------------- ESC scripts
+def is_entities_script(t):
+    return t.tag == 1 and t.data is not None and len(t.data) >= 0x24 and \
+        t.data[:4] == b'\x04\x00\x01\x00' and t.data[4:16] == b'SCR_Entities'
+
+
+def entity_strings(e):
+    """Decode one SCR_Entities entity -> (name, [(operand_pos, string)], layout dict)."""
+    hc, tc, ss = u16(e, 0x4E), u16(e, 0x50), u16(e, 0x52)
+    hstart = 0x54
+    sstart = hstart + hc * 4 + tc * 2          # stream: u16 0, opcodes, strings
+    ostart = sstart + 2
+    textstart = sstart + ss
+    stream = e[ostart:textstart]
+    refs, code_end = [], 0
+    for i in range(hc):
+        p = u16(e, hstart + i * 4 + 2)
+        while True:
+            op = stream[p]; p += 1
+            if op >= 0x3A:
+                break
+            if op in (0x00, 0x01):
+                p += 4
+            elif 0x02 <= op <= 0x10:
+                if op == 0x0E:
+                    refs.append(p)
+                p += 2
+        code_end = max(code_end, p)
+    name = zstr(e, textstart)
+    strs = [(r, zstr(stream, u16(stream, r))) for r in refs]
+    return name, strs, dict(hc=hc, tc=tc, ss=ss, ostart=ostart, textstart=textstart, code_end=code_end, stream=stream)
+
+
+def patch_entity(e, renames):
+    name, strs, L = entity_strings(e)
+    if not any(s in renames for _, s in strs):
+        return e, 0
+    stream, code_end = L['stream'], L['code_end']
+    for r, _ in strs:
+        assert u16(stream, r) >= code_end, 'string inside code region?'
+    newstream = bytearray(stream[:code_end])
+    newoff, changed = {}, 0
+    for r, s in sorted(strs, key=lambda x: u16(stream, x[0])):
+        so = u16(stream, r)
+        if so not in newoff:
+            s2 = renames.get(s, s)
+            changed += s2 != s
+            newoff[so] = len(newstream)
+            newstream += s2.encode('latin1') + b'\0'
+    for r, _ in strs:
+        struct.pack_into('<H', newstream, r, newoff[u16(stream, r)])
+    tail = e[L['textstart']:]
+    namelen = len(name) + 1
+    assert tail[namelen:].strip(b'\0') == b'', 'unexpected data after entity name'
+    ne = bytearray(e[:L['ostart']]) + newstream + tail[:namelen]
+    ne += b'\0' * (align(len(ne), 4) - len(ne))
+    struct.pack_into('<H', ne, 0x44, len(ne))
+    struct.pack_into('<H', ne, 0x52, 2 + len(newstream))
+    return bytes(ne), changed
+
+
+def iter_entities(data):
+    b = data[0x24:]
+    pos = 0
+    while pos + 0x54 <= len(b):
+        size = u16(b, pos + 0x44)
+        if size == 0:
+            break
+        yield b[pos:pos + size]
+        pos += size
+
+
+def patch_esc_tag(t, renames):
+    out = bytearray(t.data[:0x24])
+    changed = 0
+    for e in iter_entities(t.data):
+        ne, ch = patch_entity(e, renames)
+        out += ne; changed += ch
+    return bytes(out), changed
+
+
+# ----------------------------------------------------------------------------- RSRCS
+def rsrcs_names(t):
+    return [t.data[i:i + 24].split(b'\0')[0].decode('latin1') for i in range(0, len(t.data), 24)]
+
+
+def rsrcs_build(names):
+    out = bytearray()
+    for n in names:
+        nb = n.encode('latin1')
+        assert len(nb) < 24
+        out += nb + b'\0' * (24 - len(nb))
+    return bytes(out)
+
+
+# ----------------------------------------------------------------------------- commands
+def find_tag(tags, name):
+    for t in tags:
+        if t.name == name:
+            return t
+    return None
+
+
+def cmd_dump(args):
+    for extra in args.names or []:
+        DC(read_wad(extra))
+    tags = read_wad(args.wad)
+    r = find_tag(tags, 'RSRCS')
+    print(f'== {args.wad}: {len(tags)} tags')
+    print('RSRCS (enemy WADs to load):', rsrcs_names(r) if r else '(none)')
+    dc = DC(tags)
+    print('DC_WAD top-level objects:', ', '.join(n for _, n in dc.top))
+    if dc.imports:
+        print('DC_WAD imports (offset -> external template):', dc.imports)
+    pools = dc.pools()
+    print(f'DC_WAD pools: {sum(p["kind"]=="go" for p in pools)} object pools, {sum(p["kind"]=="mem" for p in pools)} memory pools')
+    seq = sorted(pools, key=lambda p: p['idx'])
+    unres = [p for p in pools if ghash(p['name']) != p['hash']]
+    if unres:
+        print(f'   ({len(unres)} pool names could not be resolved from this WAD; pass more WADs via dump --names to learn them)')
+    for p in seq:
+        print(f"   {p['idx']:3d} {'GO ' if p['kind']=='go' else 'MEM'} {p['name']:24s} x{p['count']:<3d} (hash {p['hash']:08x})")
+    if r:
+        for en in rsrcs_names(r):
+            go, mem = enemy_block(pools, en)
+            if go is None:
+                print(f'   !! {en}: no go{en} pool in DC_WAD')
+            else:
+                print(f'   block for {en}: N={go[0]["count"]} GO idx {go[0]["idx"]}..{go[-1]["idx"]}, MEM idx {mem[0]["idx"]}..{mem[-1]["idx"]}')
+    print('Spawner scripts (ESC entities pushing CRT_/BRA_ strings):')
+    for i, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                name, strs, _ = entity_strings(e)
+                crt = [s for _, s in strs if s.startswith('CRT_')]
+                bra = [s for _, s in strs if s.startswith('BRA_')]
+                if crt or bra:
+                    print(f'   tag#{i} {t.name:28s} entity {name!r}: {sorted(set(crt))} {sorted(set(bra))}')
+
+
+def cmd_swap(args):
+    tags = read_wad(args.wad)
+    donor = read_wad(args.donor)
+    old, new = args.old, args.new
+    renames = {f'CRT_{old}': f'CRT_{new}'}
+    for r in args.rename or []:
+        a, b = r.split('=', 1); renames[a] = b
+
+    # 1. RSRCS
+    r = find_tag(tags, 'RSRCS')
+    names = rsrcs_names(r)
+    if old not in names:
+        raise SystemExit(f'RSRCS of {args.wad} = {names}; {old!r} not in it')
+    if new in names:
+        raise SystemExit(f'{new!r} already in RSRCS {names}')
+    names[names.index(old)] = new
+    r.data = rsrcs_build(names)
+    print(f'RSRCS: {names}')
+
+    # 2. DC_WAD pools
+    ddc = DC(donor)
+    dc = DC(tags)
+    old_go, old_mem = enemy_block(dc.pools(), old)
+    if old_go is None:
+        raise SystemExit(f'go{old} pool not found in {args.wad}')
+    new_go, new_mem = enemy_block(ddc.pools(), new)
+    if new_go is None:
+        raise SystemExit(f'go{new} pool not found in donor {args.donor}')
+    n_old, n_donor = old_go[0]['count'], new_go[0]['count']
+    n_new = args.count or n_old
+    sgo, smem = scale_block(new_go, n_donor, n_new), scale_block(new_mem, n_donor, n_new)
+    print(f'pools: removing {old} block ({len(old_go)} GO + {len(old_mem)} MEM, N={n_old}); '
+          f'inserting {new} block from donor ({len(sgo)} GO + {len(smem)} MEM, donor N={n_donor} -> N={n_new})')
+    for h, c, n in sgo + smem:
+        print(f'      {n:24s} x{c}')
+    delta = rebuild_pools(dc, old_go, old_mem, sgo, smem)
+    dc.store()
+    print(f'DC_WAD blob {len(dc.blob) - delta} -> {len(dc.blob)} bytes')
+
+    # 3. ESC spawners
+    total = 0
+    for i, t in enumerate(tags):
+        if is_entities_script(t):
+            nd, ch = patch_esc_tag(t, renames)
+            if ch:
+                print(f'ESC tag#{i} {t.name}: {ch} string(s) renamed, {len(t.data)} -> {len(nd)} bytes')
+                t.data = nd; total += ch
+    if total == 0:
+        print(f'WARNING: no spawner pushed CRT_{old}; nothing renamed in scripts')
+
+    # behaviours still referenced next to the new creature
+    bras = set()
+    for t in tags:
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                _, strs, _ = entity_strings(e)
+                ss = [s for _, s in strs]
+                if f'CRT_{new}' in ss:
+                    bras.update(s for s in ss if s.startswith('BRA_'))
+    print(f'spawn behaviours used with CRT_{new}: {sorted(bras)}  <- must exist in R_{new.upper()}.WAD (use --rename to map)')
+
+    out = write_wad(tags)
+    open(args.output, 'wb').write(out)
+    print(f'wrote {args.output} ({len(out)} bytes)')
+    # sanity: re-read and dump block
+    t2 = read_wad(args.output)
+    dc2 = DC(t2)
+    go, mem = enemy_block(dc2.pools(), new)
+    assert go and mem, 'post-write check failed'
+    print(f'verified: {new} block present in output (GO idx {go[0]["idx"]}..{go[-1]["idx"]}, MEM idx {mem[0]["idx"]}..{mem[-1]["idx"]})')
+
+
+def cmd_selftest(args):
+    ok = True
+    for w in args.wads:
+        raw = open(w, 'rb').read()
+        tags = read_wad(w)
+        rt = write_wad(tags)
+        print(f'{w}: wad round-trip {"OK" if rt == raw else "MISMATCH"} ({len(tags)} tags)')
+        ok &= rt == raw
+        dc = DC(tags)
+        for tg, builder, src in [(0x10, build_fields(dc.fields), 'fields'), (0x0D, build_pairs(dc.top), 'toplevel'),
+                                 (0x0E, build_pairs(dc.imports), 'imports'), (0x0F, build_hashes(dc.hashes), 'hashes')]:
+            same = builder == tags[dc.ti[tg]].data
+            if tg == 0x0F and not same:
+                print('   DC tag 0x0f (hashes) re-serialize differs: shipped table has bad string offsets, rebuilt cleanly')
+            else:
+                ok &= same
+                print(f'   DC tag {tg:#04x} ({src}) re-serialize {"OK" if same else "MISMATCH"}')
+        wfi = dc.wad_field(); woff = dc.fields[wfi][0]
+        pools = dc.pools()
+        n_go = sum(p['kind'] == 'go' for p in pools); n_mem = len(pools) - n_go
+        same = wad_header(n_go, n_mem) == dc.blob[woff:woff + 8]
+        ok &= same
+        print(f'   WAD object header formula {"OK" if same else "MISMATCH"} (nGO={n_go}, nMem={n_mem})')
+        # ESC: re-encode every entity with identity renames (forced) and compare
+        bad = 0; n = 0
+        for t in tags:
+            if is_entities_script(t):
+                for e in iter_entities(t.data):
+                    name, strs, L = entity_strings(e)
+                    n += 1
+                    if strs:
+                        ne, _ = patch_entity(e, {strs[0][1]: strs[0][1] + ''})  # no-op rename path
+                        # force rebuild path
+                        stream = L['stream']
+                        ne2, _ = patch_entity(e, {'\0never': ''})
+                        if ne != e:
+                            bad += 1
+        print(f'   ESC entities: {n} parsed, {bad} failed to re-encode identically')
+        ok &= bad == 0
+    print('SELFTEST', 'PASSED' if ok else 'FAILED')
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = ap.add_subparsers(dest='cmd', required=True)
+    d = sp.add_parser('dump'); d.add_argument('wad')
+    d.add_argument('--names', action='append', help='other WADs whose hash tables help resolve names')
+    d.set_defaults(fn=cmd_dump)
+    s = sp.add_parser('swap'); s.add_argument('wad')
+    s.add_argument('--old', required=True, help='enemy name as in RSRCS, e.g. Satyr10')
+    s.add_argument('--new', required=True, help='replacement enemy name, e.g. Orders02')
+    s.add_argument('--donor', required=True, help='a level WAD that already uses --new (source of its pool block)')
+    s.add_argument('--count', type=int, help='max simultaneous instances N (default: same N as the old enemy)')
+    s.add_argument('--rename', action='append', help='extra script string rename OLD=NEW (e.g. BRA_SpawnCeiling=BRA_Spawn)')
+    s.add_argument('-o', '--output', required=True); s.set_defaults(fn=cmd_swap)
+    t = sp.add_parser('selftest'); t.add_argument('wads', nargs='+'); t.set_defaults(fn=cmd_selftest)
+    args = ap.parse_args()
+    sys.exit(args.fn(args) or 0)
+
+
+if __name__ == '__main__':
+    main()
+
+
+# ============================================================================ plan API (used by UI)
+def level_info(tags):
+    """Everything the UI needs about a level: RSRCS, creature blocks, encounters."""
+    r = find_tag(tags, 'RSRCS')
+    names = rsrcs_names(r) if r else []
+    dc = DC(tags)
+    pools = dc.pools()
+    creatures = {}
+    for en in names:
+        go, mem = enemy_block(pools, en)
+        creatures[en] = None if go is None else dict(
+            n=go[0]['count'], go=[[p['hash'], p['count'], p['name']] for p in go],
+            mem=[[p['hash'], p['count'], p['name']] for p in mem])
+    encounters = []
+    for i, t in enumerate(tags):
+        if is_entities_script(t):
+            ents = []
+            for e in iter_entities(t.data):
+                name, strs, _ = entity_strings(e)
+                ss = [s for _, s in strs]
+                crt = [s[4:] for s in ss if s.startswith('CRT_')]
+                bra = [s for s in ss if s.startswith('BRA_')]
+                if crt:
+                    ents.append(dict(name=name, crt=crt[0], bra=sorted(set(bra))))
+            if ents:
+                encounters.append(dict(tag=i, script=t.name, entities=ents))
+    return dict(rsrcs=names, creatures=creatures, encounters=encounters,
+                pools=[dict(idx=p['idx'], kind=p['kind'], name=p['name'], count=p['count']) for p in sorted(pools, key=lambda p: p['idx'])])
+
+
+def apply_plan(tags, plan, creature_db, log=print):
+    """plan = {assign: {"tag:entity": NewCreature}, counts: {Creature: N}, remove_unused: bool,
+               bra_fallback: "BRA_Spawn", renames: {old: new}}
+       creature_db = {Creature: {bra: [...], block: {n, go: [[h,c,name]], mem: [[h,c,name]]} or None}}"""
+    assign = {tuple(k.split(':', 1)) if isinstance(k, str) else k: v for k, v in plan.get('assign', {}).items()}
+    assign = {(int(a), b): v for (a, b), v in assign.items()}
+    counts = dict(plan.get('counts', {}))
+    fallback = plan.get('bra_fallback', 'BRA_Spawn')
+    extra = dict(plan.get('renames', {}))
+
+    # usage after assignment
+    usage = {}
+    for i, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                name, strs, _ = entity_strings(e)
+                crt = [s[4:] for _, s in strs if s.startswith('CRT_')]
+                if crt:
+                    cur = assign.get((i, name), crt[0])
+                    usage[cur] = usage.get(cur, 0) + 1
+    r = find_tag(tags, 'RSRCS')
+    names = rsrcs_names(r) if r else []
+    dc = DC(tags)
+    added = [c for c in usage if c not in names]
+    removed = [c for c in names if c not in usage] if plan.get('remove_unused', True) else []
+
+    for c in removed:
+        go, mem = enemy_block(dc.pools(), c)
+        if go:
+            rebuild_pools(dc, go, mem, [], [])
+            log(f'pools: removed {c} block ({len(go)} GO + {len(mem)} MEM)')
+        names.remove(c)
+    for c in added:
+        info = creature_db.get(c, {})
+        blk = info.get('block')
+        if not blk:
+            raise ValueError(f'{c}: no donor pool block known (scan more levels)')
+        n = counts.get(c, blk['n'])
+        go = [dict(hash=h, count=k, name=nm) for h, k, nm in blk['go']]
+        mem = [dict(hash=h, count=k, name=nm) for h, k, nm in blk['mem']]
+        sgo, smem = scale_block(go, blk['n'], n), scale_block(mem, blk['n'], n)
+        rebuild_pools(dc, [], [], sgo, smem)
+        names.append(c)
+        log(f'pools: added {c} block ({len(sgo)} GO + {len(smem)} MEM, N={n}, donor N={blk["n"]})')
+    for c, n in counts.items():
+        if c in added or c in removed:
+            continue
+        go, mem = enemy_block(dc.pools(), c)
+        if go and go[0]['count'] != n:
+            rebuild_pools(dc, go, mem, scale_block(go, go[0]['count'], n), scale_block(mem, go[0]['count'], n))
+            log(f'pools: rescaled {c} N {go[0]["count"]} -> {n}')
+    dc.store()
+    if r:
+        r.data = rsrcs_build(names)
+    log(f'RSRCS: {names}')
+
+    total = 0
+    for i, t in enumerate(tags):
+        if not is_entities_script(t):
+            continue
+        out = bytearray(t.data[:0x24]); ch_tag = 0
+        for e in iter_entities(t.data):
+            name, strs, _ = entity_strings(e)
+            ss = [s for _, s in strs]
+            crt = [s[4:] for s in ss if s.startswith('CRT_')]
+            ren = dict(extra)
+            if crt and (i, name) in assign and assign[(i, name)] != crt[0]:
+                new = assign[(i, name)]
+                ren[f'CRT_{crt[0]}'] = f'CRT_{new}'
+                avail = set(creature_db.get(new, {}).get('bra') or [])
+                for b in ss:
+                    if b.startswith('BRA_') and avail and b not in avail:
+                        ren[b] = fallback
+            ne, ch = patch_entity(e, ren) if ren else (e, 0)
+            out += ne; ch_tag += ch
+        if ch_tag:
+            t.data = bytes(out); total += ch_tag
+            log(f'ESC tag#{i} {t.name}: {ch_tag} string(s) renamed')
+    log(f'{total} script strings changed; RSRCS={names}')
+    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total)

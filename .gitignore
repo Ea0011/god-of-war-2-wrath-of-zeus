@@ -1,0 +1,18 @@
+# whitelist: nothing from the game or generated data leaves this machine
+/*
+!/.gitignore
+!/README.md
+!/docs/
+!/scripts/
+/scripts/*
+!/scripts/gow2_enemy_swap.py
+!/scripts/gow2_swap_ui.py
+!/scripts/gow2_swap_ui.html
+!/scripts/start_swap_ui.sh
+!/.claude/
+/.claude/*
+!/.claude/skills/
+*.WAD
+*.wad
+*.iso
+*.ISO
