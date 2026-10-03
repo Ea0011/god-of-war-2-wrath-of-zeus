@@ -139,10 +139,12 @@ def creature_db(prefer_level=None):
     for cn, c in merged.items():
         donors = c.get('donors', {})
         blk = None
-        if prefer_level in donors:
-            blk = donors[prefer_level]
-        elif donors:
-            blk = max(donors.values(), key=lambda b: b['n'])
+        # never take a block from a level we have modified ourselves (it has a backup); prefer shipped data
+        shipped = {k: v for k, v in donors.items() if not os.path.exists(os.path.join(BACKUPS, k + '.orig'))} or donors
+        if prefer_level in shipped:
+            blk = shipped[prefer_level]
+        elif shipped:
+            blk = max(shipped.values(), key=lambda b: b['n'])
         db[cn] = dict(bra=c.get('bra', []), block=blk, wad=c.get('wad'), donors=sorted(donors), bytes=c.get('bytes'))
     return db
 
