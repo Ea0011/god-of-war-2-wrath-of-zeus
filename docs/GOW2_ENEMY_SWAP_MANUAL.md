@@ -251,12 +251,6 @@ chain fires on the first destruction event. Use it (a) to progress while testing
 (b) as a diagnostic: if the door still does not open with everything bypassed, the death sensors
 are not firing for that creature at all.
 
-### 7.3 Plans are applied to the shipped original
-
-The UI (and `base_path()` in the server) always builds from `backups/<LEVEL>.WAD.orig` when it
-exists and only inspects the ISO copy. A plan therefore describes the whole level state; unticking
-a bypass or reverting an assignment really reverts it in the next upload. Without a backup (first
-upload of a level) the ISO copy is the shipped level and is used as base.
 
 ## 8. Memory budget (confirmed in game)
 

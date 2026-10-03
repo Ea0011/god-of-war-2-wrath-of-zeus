@@ -156,69 +156,14 @@ def budget(rsrcs, db=None):
     return dict(rows=rows, total=sum(b or 0 for _, b in rows), unknown=[c for c, b in rows if b is None])
 
 
-def base_path(name):
-    """Plans are always applied to the shipped original (the backup) so they are complete and
-    reversible; the ISO copy is only inspected."""
-    bk = os.path.join(BACKUPS, name + '.orig')
-    return bk if os.path.exists(bk) else fetch_wad(name)
-
-
-def plan_from_diff(base_tags, iso_tags):
-    """Reconstruct a plan that turns the shipped level into the ISO copy (assignments, pool N,
-    spawn counts, gate values, bypassed thresholds)."""
-    b, i = G.level_info(base_tags), G.level_info(iso_tags)
-    plan = dict(assign={}, counts={}, gates={}, spawns={}, bypass=[])
-    ib = {(enc['tag'], e['name']): e for enc in i['encounters'] for e in enc['entities']}
-    for enc in b['encounters']:
-        for e in enc['entities']:
-            x = ib.get((enc['tag'], e['name']))
-            if not x:
-                continue
-            k = f"{enc['tag']}:{e['name']}"
-            if x['crt'] != e['crt']:
-                plan['assign'][k] = x['crt']
-            sp = {}
-            if e['count'] is not None and x['count'] != e['count']:
-                sp['count'] = x['count']
-            if e['alive'] is not None and x['alive'] != e['alive']:
-                sp['alive'] = x['alive']
-            if sp:
-                plan['spawns'][k] = sp
-    for c, blk in i['creatures'].items():
-        if blk and (c not in b['creatures'] or not b['creatures'][c] or b['creatures'][c]['n'] != blk['n']):
-            plan['counts'][c] = blk['n']
-    bg = {g['var']: g for g in b['gates']}
-    for g in i['gates']:
-        o = bg.get(g['var'])
-        if o and o.get('init') is not None and g.get('init') != o['init']:
-            plan['gates'][str(g['var'])] = g['init']
-    # bypass: a threshold whose comparing handlers vanished in the ISO copy (overwritten with 11 38 3A)
-    for g in b['gates']:
-        if g['role'] == 'threshold' and g['compared_in']:
-            gi = next((x for x in i['gates'] if x['var'] == g['var']), None)
-            if gi is not None and not gi['compared_in']:
-                plan['bypass'].append(g['var'])
-    return plan
-
-
 def level_load(name, force=False):
     p = fetch_wad(name, force)
-    iso_tags = G.read_wad(p)
-    iso_info = G.level_info(iso_tags)
-    base = base_path(name)
-    info = G.level_info(G.read_wad(base)) if base != p else iso_info
-    info['base'] = 'shipped original (backup)' if base != p else 'ISO copy (no backup yet, so this is the shipped level)'
-    info['iso'] = dict(rsrcs=iso_info['rsrcs'], size=os.path.getsize(p),
-                       sha256=hashlib.sha256(open(p, 'rb').read()).hexdigest(),
-                       creatures={k: (v and v['n']) for k, v in iso_info['creatures'].items()},
-                       modified=hashlib.sha256(open(p, 'rb').read()).hexdigest() != hashlib.sha256(open(base, 'rb').read()).hexdigest())
-    info['budget'] = budget(iso_info['rsrcs'])
-    info['budget_original'] = budget(info['rsrcs'])
-    if base != p and info['iso']['modified']:
-        try:
-            info['iso_plan'] = plan_from_diff(G.read_wad(base), iso_tags)
-        except Exception as e:
-            info['iso_plan_error'] = str(e)
+    tags = G.read_wad(p)
+    info = G.level_info(tags)
+    info['budget'] = budget(info['rsrcs'])
+    bk0 = os.path.join(BACKUPS, name + '.orig')
+    if os.path.exists(bk0):
+        info['budget_original'] = budget(G.level_info(G.read_wad(bk0))['rsrcs'])
     info['file'] = p; info['size'] = os.path.getsize(p)
     info['sha256'] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     bk = os.path.join(BACKUPS, name + '.orig')
@@ -229,8 +174,7 @@ def level_load(name, force=False):
 def level_apply(name, plan, upload):
     log = []
     p = fetch_wad(name)
-    tags = G.read_wad(base_path(name))
-    log.append('base: ' + ('shipped original' if base_path(name) != p else 'ISO copy'))
+    tags = G.read_wad(p)
     res = G.apply_plan(tags, plan, creature_db(), log=log.append)
     b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}" + (f" (unknown size: {b['unknown']})" if b['unknown'] else ''))
     data = G.write_wad(tags)
@@ -277,7 +221,7 @@ class H(BaseHTTPRequestHandler):
 
     def _json(self, obj, code=200):
         b = json.dumps(obj).encode()
-        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Cache-Control', 'no-store'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
 
     def _err(self, e):
         self._json(dict(error=str(e)), 500)
@@ -287,7 +231,7 @@ class H(BaseHTTPRequestHandler):
         try:
             if u.path == '/':
                 b = open(os.path.join(HERE, 'gow2_swap_ui.html'), 'rb').read()
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Cache-Control', 'no-store'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
             elif u.path == '/api/status':
                 try:
                     pack_list(); ok = True
@@ -316,7 +260,7 @@ class H(BaseHTTPRequestHandler):
                     threading.Thread(target=scan_worker, args=(body.get('levels', r'^[A-Z]+\d+\.WAD$'),), daemon=True).start()
                 self._json(STATE['scan'])
             elif self.path == '/api/preview':
-                tags = G.read_wad(base_path(body['name'])); log = []
+                tags = G.read_wad(fetch_wad(body['name'])); log = []
                 res = G.apply_plan(tags, body['plan'], creature_db(), log=log.append)
                 b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}")
                 res['log'] = log; res['budget'] = b; res['wad_bytes'] = len(G.write_wad(tags)); self._json(res)
