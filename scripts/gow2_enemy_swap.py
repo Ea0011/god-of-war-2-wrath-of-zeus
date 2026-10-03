@@ -627,7 +627,7 @@ def level_info(tags):
                     ents.append(dict(name=name, crt=crt[0], bra=sorted(set(bra))))
             if ents:
                 encounters.append(dict(tag=i, script=t.name, entities=ents))
-    return dict(rsrcs=names, creatures=creatures, encounters=encounters,
+    return dict(rsrcs=names, creatures=creatures, encounters=encounters, gates=level_gates(tags),
                 pools=[dict(idx=p['idx'], kind=p['kind'], name=p['name'], count=p['count']) for p in sorted(pools, key=lambda p: p['idx'])])
 
 
@@ -641,8 +641,8 @@ def apply_plan(tags, plan, creature_db, log=print):
     fallback = plan.get('bra_fallback', 'BRA_Spawn')
     extra = dict(plan.get('renames', {}))
 
-    # usage after assignment
-    usage = {}
+    # usage after assignment, and which creatures each replacement stands in for
+    usage, replaces = {}, {}
     for i, t in enumerate(tags):
         if is_entities_script(t):
             for e in iter_entities(t.data):
@@ -651,10 +651,24 @@ def apply_plan(tags, plan, creature_db, log=print):
                 if crt:
                     cur = assign.get((i, name), crt[0])
                     usage[cur] = usage.get(cur, 0) + 1
+                    if cur != crt[0]:
+                        replaces.setdefault(cur, set()).add(crt[0])
     r = find_tag(tags, 'RSRCS')
     names = rsrcs_names(r) if r else []
     dc = DC(tags)
-    added = [c for c in usage if c not in names]
+    # default N for a new creature: never below the pool size of what it replaces, so every
+    # spawner that could get a slot before still can (destruction sensors depend on it)
+    pools0 = dc.pools()
+    for c, olds in replaces.items():
+        if c not in counts and (c not in names or enemy_block(pools0, c)[0] is None):
+            n_old = [enemy_block(pools0, o)[0][0]['count'] for o in olds if enemy_block(pools0, o)[0]]
+            blk = creature_db.get(c, {}).get('block')
+            if n_old and blk:
+                counts[c] = max(blk['n'], *n_old)
+    # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
+    # (e.g. Orders10 in the shipped RHOD10) once spawners are pointed at them
+    added = [c for c in usage if c not in names or
+             (enemy_block(pools0, c)[0] is None and creature_db.get(c, {}).get('block'))]
     removed = [c for c in names if c not in usage] if plan.get('remove_unused', True) else []
 
     for c in removed:
@@ -673,7 +687,8 @@ def apply_plan(tags, plan, creature_db, log=print):
         mem = [dict(hash=h, count=k, name=nm) for h, k, nm in blk['mem']]
         sgo, smem = scale_block(go, blk['n'], n), scale_block(mem, blk['n'], n)
         rebuild_pools(dc, [], [], sgo, smem)
-        names.append(c)
+        if c not in names:
+            names.append(c)
         log(f'pools: added {c} block ({len(sgo)} GO + {len(smem)} MEM, N={n}, donor N={blk["n"]})')
     for c, n in counts.items():
         if c in added or c in removed:
@@ -710,4 +725,126 @@ def apply_plan(tags, plan, creature_db, log=print):
             t.data = bytes(out); total += ch_tag
             log(f'ESC tag#{i} {t.name}: {ch_tag} string(s) renamed')
     log(f'{total} script strings changed; RSRCS={names}')
-    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total)
+    ngates = apply_gates(tags, plan.get('gates', {}), log=log) if plan.get('gates') else 0
+    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates)
+
+
+# ============================================================================ progression gates
+OP_SIZES = {0x00: 4, 0x01: 4}
+for _o in range(0x02, 0x11):
+    OP_SIZES[_o] = 2
+SCOPE_NAMES = {0: 'Entity', 1: 'Internal', 2: 'GlobalData', 3: 'LevelData'}
+GET_TYPES = {0x02: 'float', 0x03: 'int', 0x04: 'bool', 0x05: 'string'}
+SET_TYPES = {0x06: 'float', 0x07: 'int', 0x08: 'bool', 0x09: 'string'}
+ENTITY_TYPE_LEVEL_DATA = 12
+
+
+def walk_ops(stream, start):
+    """yield (pos, opcode, operand bytes) until exit."""
+    p = start
+    while p < len(stream):
+        op = stream[p]; p += 1
+        if op >= 0x3A:
+            yield p - 1, op, b''
+            return
+        n = OP_SIZES.get(op, 0)
+        yield p - 1, op, stream[p:p + n]
+        p += n
+
+
+def entity_handlers(e):
+    """[(handler id, stream offset of its first opcode)] + stream slice offsets."""
+    hc, tc = u16(e, 0x4E), u16(e, 0x50)
+    hstart = 0x54
+    ostart = hstart + hc * 4 + tc * 2 + 2
+    return [(u16(e, hstart + i * 4), u16(e, hstart + i * 4 + 2)) for i in range(hc)], ostart
+
+
+def level_gates(tags):
+    """Find every LevelData variable: initial constant (editable in place), who increments it,
+    who compares it.  Returns a list of dicts sorted by variable index."""
+    init, incr, reads, compares = {}, {}, {}, {}
+    for ti, t in enumerate(tags):
+        if not is_entities_script(t):
+            continue
+        epos = 0x24
+        for e in iter_entities(t.data):
+            name = entity_strings(e)[0]
+            etype = u16(e, 0x46)
+            handlers, ostart = entity_handlers(e)
+            stream = e[ostart:]
+            for hid, start in handlers:
+                ops = list(walk_ops(stream, start))
+                # initial value:  push_const ; set_scope LevelData[v]
+                if etype == ENTITY_TYPE_LEVEL_DATA and len(ops) >= 2 and ops[1][1] in SET_TYPES:
+                    scope, fid = u16(ops[1][2], 0) >> 12, u16(ops[1][2], 0) & 0xFFF
+                    if scope == 3:
+                        op0 = ops[0]
+                        if op0[1] == 0x01:
+                            val, kind = struct.unpack('<i', op0[2])[0], 'int'
+                        elif op0[1] == 0x00:
+                            val, kind = struct.unpack('<f', op0[2])[0], 'float'
+                        elif op0[1] in (0x11, 0x12):
+                            val, kind = op0[1] == 0x11, 'bool'
+                        else:
+                            continue
+                        init[fid] = dict(var=fid, type=SET_TYPES[ops[1][1]], init=val, const_kind=kind,
+                                         entity=name, handler=hid, tag=ti,
+                                         file_off_in_tag=epos + ostart + op0[0] + 1 if kind != 'bool' else None)
+                        continue
+                # counters: get v ; push_int 1 ; sum ; set v
+                codes = [o[1] for o in ops]
+                for k in range(len(ops) - 3):
+                    if codes[k] == 0x03 and codes[k + 1] == 0x01 and codes[k + 2] == 0x15 and codes[k + 3] == 0x07:
+                        a, b = u16(ops[k][2], 0), u16(ops[k + 3][2], 0)
+                        if a >> 12 == 3 and a == b:
+                            incr.setdefault(a & 0xFFF, []).append(name)
+                # compares: get a ; get b ; cmp
+                for k in range(len(ops) - 2):
+                    if codes[k] in GET_TYPES and codes[k + 1] in GET_TYPES and 0x2E <= codes[k + 2] <= 0x37:
+                        a, b = u16(ops[k][2], 0), u16(ops[k + 1][2], 0)
+                        if a >> 12 == 3 and b >> 12 == 3:
+                            compares.setdefault(a & 0xFFF, set()).add((b & 0xFFF, name))
+                            compares.setdefault(b & 0xFFF, set()).add((a & 0xFFF, name))
+                for o in ops:
+                    if o[1] in GET_TYPES and u16(o[2], 0) >> 12 == 3:
+                        reads.setdefault(u16(o[2], 0) & 0xFFF, set()).add(name)
+            epos += len(e)
+    out = []
+    for v in sorted(set(init) | set(incr) | set(reads)):
+        d = dict(init.get(v, dict(var=v, type='?', init=None)))
+        d['incremented_by'] = sorted(set(incr.get(v, [])))
+        d['compared_with'] = sorted({o for o, _ in compares.get(v, set())})
+        d['compared_in'] = sorted({n for _, n in compares.get(v, set())})
+        d['read_by'] = sorted(reads.get(v, set()))
+        if d['incremented_by']:
+            d['role'] = 'counter'
+        elif d['compared_with'] and any(o in incr for o in d['compared_with']):
+            d['role'] = 'threshold'
+        elif d.get('type') == 'bool':
+            d['role'] = 'flag'
+        else:
+            d['role'] = 'value'
+        out.append(d)
+    return out
+
+
+def apply_gates(tags, values, log=print):
+    """values: {var index (int or str): new number}. Patches the push_int/push_float operand in place."""
+    gates = {g['var']: g for g in level_gates(tags)}
+    n = 0
+    for k, val in values.items():
+        v = int(k, 0) if isinstance(k, str) else int(k)
+        g = gates.get(v)
+        if not g or g.get('file_off_in_tag') is None:
+            raise ValueError(f'LevelData[{v:#x}] has no editable numeric initializer')
+        t = tags[g['tag']]
+        data = bytearray(t.data)
+        off = g['file_off_in_tag']
+        if g['const_kind'] == 'int':
+            struct.pack_into('<i', data, off, int(val))
+        else:
+            struct.pack_into('<f', data, off, float(val))
+        t.data = bytes(data); n += 1
+        log(f"gate LevelData[{v:#x}] ({g['entity']} h{g['handler']}): {g['init']} -> {val}")
+    return n

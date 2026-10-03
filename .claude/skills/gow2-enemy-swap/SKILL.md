@@ -21,3 +21,8 @@ Quick facts an agent needs before touching anything:
 - Ignore `scripts/{compare_groups,extract_embedded_wad,swap_enemy_instances,wad_*}.py` and
   `skills/*.skill`: they assume tags (GOFF/GOBJ) that do not exist.
 - Verified in game 2026-10-03: RHOD10 Rhodes soldiers -> Satyr10 worked first try.
+- Progression (doors opening after N kills) is driven by LevelData constants in type-12 "level
+  data" entities, incremented by type-3 destruction sensors; `level_gates()`/`apply_gates()` in the
+  tool and the UI's Progression gates card edit them in place (manual section 7). Never bulk-assign
+  scripted entities (bosses, door soldiers) and never let a replacement's pool N drop below the
+  original, or sensors stop firing and gates never open.

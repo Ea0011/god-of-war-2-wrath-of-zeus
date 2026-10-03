@@ -1,32 +1,59 @@
-# God of War 2: Wrath of Zeus
+# GoW2 Enemy Swap
 
-Tools and documentation for swapping enemies between levels of **God of War II (PS2)** by
-editing the level WADs inside the game ISO.
+This repository contains a Python script (`gow2_enemy_swap.py`) that can swap enemy
+prototypes in any exported *God of War II* (PS2) level.  It reads the level WAD, the
+sub‑WAD blobs that hold the enemy definitions, the RSRCS list that tells the engine
+which enemies to load, and the ESC scripts that spawn them.  It then updates all of
+those structures so that one enemy (e.g. **Satyr10**) is replaced with another
+(e.g. **Orders02**).
 
-- `docs/GOW2_ENEMY_SWAP_MANUAL.md` – the manual: running the browser + UI, format reference,
-  manual hex edits, troubleshooting.
-- `docs/GOW2_DC_WAD_FORMAT.md` – long-form reverse-engineering notes on the `DC_WAD_*` tags.
-- `scripts/gow2_enemy_swap.py` – WAD reader/writer, DC_WAD decoder, `dump` / `swap` / `selftest`
-  CLI and the `apply_plan()` API used by the UI.
-- `scripts/gow2_swap_ui.py` + `gow2_swap_ui.html` – local web UI for per-encounter swaps
-  (http://localhost:8787), talking to god_of_war_browser for ISO access.
-- `scripts/start_swap_ui.sh` – starts god_of_war_browser (:8000) and the UI.
-- `.claude/skills/gow2-enemy-swap/` – Claude Code skill wrapping the same knowledge.
+## Prerequisites
 
-## Requirements
-
-- Python 3.10+ (standard library only).
-- [mogaika/god_of_war_browser](https://github.com/mogaika/god_of_war_browser) cloned next to
-  the scripts as `god_of_war_browser/` (used unmodified, tested at commit `1bfc55c`), Go toolchain.
-- Your own GoW2 ISO as `GoW2.iso` in the repo root. No game data is tracked here.
+* Python 3.11+ (the script uses only the standard library)
+* A copy of the level files you want to edit (e.g. `ATLAS220.WAD`, `ATLAS230.WAD`)
+* (Optional) God‑of‑War Browser if you want to test the resulting level in the game.
 
 ## Quick start
 
-```bash
-scripts/start_swap_ui.sh          # close the emulator first
-# open http://localhost:8787, Scan, Load a level, pick replacements, Apply & upload
-pkill -f gow2_swap_ui.py; pkill -f "go run . -iso"   # free the ISO before playing
-```
+1. **Dump a level** – list the enemies, pools and spawners.
+   ```bash
+   python scripts/gow2_enemy_swap.py dump sample_levels/ATLAS220.WAD
+   ```
 
-The first confirmed swap: RHOD10 (the opening level) with Rhodes soldiers replaced by satyrs,
-working in game on the first attempt.
+2. **Swap enemies** – replace `Satyr10` with `Orders02`.  The script will:
+   * replace the RSRCS entry, the enemy pool block, and all ESC script strings.
+   * also update the `GODT` pool block and behaviours used by the new creature.
+   ```bash
+   python scripts/gow2_enemy_swap.py swap \
+     sample_levels/ATLAS220.WAD \
+     --old Satyr10 --new Orders02 \
+     --donor sample_levels/ATLAS230.WAD \
+     -o sample_levels/ATLAS220_swapped.WAD
+   ```
+
+3. **Verify** – run the self‑test to confirm the file can be round‑tripped.
+   ```bash
+   python scripts/gow2_enemy_swap.py selftest sample_levels/ATLAS220_swapped.WAD
+   ```
+
+4. **Install the swap in the game** – copy the new WAD back into the ISO
+   (you can use `god_of_war_browser` in read‑write mode, or a hex editor).
+
+## More advanced usage
+
+* `--count N` – override the maximum number of simultaneous instances.
+* `--rename BRA_SpawnCeiling=BRA_Spawn` – map additional behaviour strings.
+* `--names` – provide extra WADs that help the tool resolve hash‑table names.
+
+See the script’s help (`python scripts/gow2_enemy_swap.py --help`) for full
+options.
+
+## Testing
+
+The repository ships with a GitHub Actions workflow that runs the
+`selftest` command on every commit.  The script is fully self‑contained; no
+external dependencies are required.
+
+## License
+
+MIT – see the [LICENSE](LICENSE) file.

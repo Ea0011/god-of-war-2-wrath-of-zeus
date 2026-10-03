@@ -162,3 +162,52 @@ Rules of thumb for hand edits:
 - Upload 500 / `Cannot find file`: wrong file name (case matters, e.g. `RHOD10.WAD`).
 - Readback mismatch: the ISO was read-only; close the emulator, restart the browser.
 - Game hangs on load after a swap: lower N (`--count`), or choose a smaller creature.
+
+## 7. Progression gates (kill counts needed to progress)
+
+Levels gate progress with **LevelData** variables, not with creature types:
+
+- **Level-data entities** (entity type 12, e.g. `WayLevelData1/2/3`, `Rhod10CamsLEVELDATA`) have one
+  handler per variable: `push_int N ; set_scope_int LevelData[v]`. That constant is the initial
+  value: counters start at 0, thresholds at the required count.
+- **Destruction sensors** (entity type 3, `*-DesMess1..4`) next to each spawner run
+  `LevelData[c] = LevelData[c] + 1` when the spawned creature dies, for the wave that is active,
+  and also bump the level total.
+- **Event entities** (type 7, `FirstRoomMessages-EvtMess1..4`) compare counter vs threshold
+  (`>=`, or `==` for the total) and set a flag (bool LevelData) that unlocks the next wave's
+  sensors and the door's `*-DesOpen` targets.
+
+So "N enemies must die" is one 4-byte constant. The tool extracts all of them:
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0,'scripts'); from gow2_enemy_swap import *
+tags=read_wad('backups/RHOD10.WAD.orig')
+for g in level_gates(tags):
+    if g['role'] in ('threshold','counter'): print(hex(g['var']), g['role'], g['init'], g['entity'], g['compared_with'], g['incremented_by'][:3])
+apply_gates(tags, {0xe:1, 0x10:2, 0x12:2, 0x14:6})      # patch in place, sizes unchanged
+open('out/RHOD10_easy.WAD','wb').write(write_wad(tags))
+PY
+```
+In the UI the same appears as the **Progression gates** card (thresholds editable, counters shown
+with the sensors that increment them); values go into the plan as `gates: {var: value}`.
+
+RHOD10 first room, original values and file offsets (in `backups/RHOD10.WAD.orig`):
+
+| LevelData | init | set in | file offset | bytes |
+|-----------|------|--------|-------------|-------|
+| 0xd / 0xe | 0 / **3** | wave 1 counter / required (EvtMess1) | threshold at `0xB629F` | `03 00 00 00` |
+| 0xf / 0x10 | 0 / **5** | wave 2 (EvtMess2) | `0xB62B3` | `05 00 00 00` |
+| 0x11 / 0x12 | 0 / **5** | wave 3 (EvtMess3) | `0xB62C7` | `05 00 00 00` |
+| 0x1c / 0x15 | 0 / **1** | wave 4 (EvtMess4, VisAIStop) | `0xB66D5` | `01 00 00 00` |
+| 0xb / 0x14 | 0 / **21** | total kills, checked with `==` by DoorSpawn-SendDoorEvent, DoorSparkle, FirstDoor-VisOff, MagicGuys | `0xB66CB` | `15 00 00 00` |
+
+Hex edit: overwrite the 4 little-endian bytes after the `01` (push_int) opcode. Nothing else
+moves. Keep the total (`0x14`) consistent with the waves: it is an equality check, so set it to the
+number of kills that will actually happen (wave thresholds plus whatever keeps spawning until the
+flags flip). Lowering wave thresholds without lowering the total leaves the door shut; raising
+pool N without raising the total can overshoot it.
+
+Why a spawner that never spawns breaks a door: its `DesMess` sensors never fire, the counters
+never reach the thresholds. That is what happened when Orders10 got pool N=9 in a room that
+needs 16 slots, and when the Colossus spawner was reassigned (its scripted events never ran).
