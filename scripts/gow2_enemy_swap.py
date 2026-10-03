@@ -701,8 +701,11 @@ def apply_plan(tags, plan, creature_db, log=print):
             n_old = [enemy_block(pools0, o)[0][0]['count'] for o in olds if enemy_block(pools0, o)[0]]
             blk = creature_db.get(c, {}).get('block')
             # concurrent demand = sum of 'alive' (or spawn count, or 1) over spawners assigned to c
-            demand = sum((sc.get(k, {}).get('alive') or sc.get(k, {}).get('count') or 1)
-                         for k, v in assign.items() if v == c)
+            demand = 0
+            for k, v in assign.items():
+                if v == c:
+                    info = sc.get(k, {})          # assign keys are (tag, name) tuples here
+                    demand += info.get('alive') or info.get('count') or 1
             if n_old and blk:
                 counts[c] = max(blk['n'], min(max(n_old), demand))
     # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
