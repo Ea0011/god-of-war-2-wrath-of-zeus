@@ -13,6 +13,22 @@ those structures so that one enemy (e.g. **Satyr10**) is replaced with another
 * A copy of the level files you want to edit (e.g. `ATLAS220.WAD`, `ATLAS230.WAD`)
 * (Optional) God‑of‑War Browser if you want to test the resulting level in the game.
 
+## Setup on a new machine
+
+```bash
+git clone https://github.com/Ea0011/god-of-war-2-wrath-of-zeus.git
+cd god-of-war-2-wrath-of-zeus
+scripts/setup.sh /path/to/GoW2.iso     # checks Go>=1.18, Python>=3.10, git, curl;
+                                        # clones+builds god_of_war_browser (pinned commit) into bin/
+scripts/start_swap_ui.sh                # http://localhost:8787  (browser on :8000)
+scripts/stop_swap_ui.sh                 # before launching the emulator
+```
+
+Dependencies: Go toolchain (for the browser only), Python 3 standard library (no pip packages),
+git, curl. Windows: use WSL or Git Bash; the Python and Go parts are portable, the scripts are bash.
+The ISO is yours; `GoW2.iso` may be a symlink. Nothing under `cache/`, `out/`, `backups/`, `bin/`
+or the ISO is tracked.
+
 ## Quick start
 
 1. **Dump a level** – list the enemies, pools and spawners.

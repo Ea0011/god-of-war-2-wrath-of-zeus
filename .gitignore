@@ -9,6 +9,8 @@
 !/scripts/gow2_swap_ui.py
 !/scripts/gow2_swap_ui.html
 !/scripts/start_swap_ui.sh
+!/scripts/stop_swap_ui.sh
+!/scripts/setup.sh
 !/.claude/
 /.claude/*
 !/.claude/skills/
