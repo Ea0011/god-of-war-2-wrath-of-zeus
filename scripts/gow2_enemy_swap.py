@@ -947,7 +947,8 @@ def apply_spawns(tags, spawns, log=print):
         for fld, off in (('count', info['off_count']), ('alive', info['off_alive'])):
             if fld in v and v[fld] is not None:
                 if off is None:
-                    raise ValueError(f'{k}: no {fld} handler to edit')
+                    log(f"spawn {fld} {name}: no such handler on this spawner, skipped")
+                    continue
                 struct.pack_into('<i', data, off, int(v[fld])); n += 1
                 log(f"spawn {fld} {name}: {info[fld]} -> {v[fld]}")
         tags[ti].data = bytes(data)
