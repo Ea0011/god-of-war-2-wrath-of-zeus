@@ -287,3 +287,91 @@ UI: pick "remove (never spawns)" in a spawner's "replace with" list. CLI/API: pl
 ["tag:entity", ...]`. Verified on RHOD10: removing the three starters and the two Orders10
 spawners drops Orders10 from RSRCS, injects count handlers into the starters, and the total goes
 21 -> 13; the result round-trips byte-exact through the parser.
+
+## 10. By hand: hex editor + god_of_war_browser only
+
+Everything the tool does can be done with the browser's per-tag download/upload and a hex editor.
+In the browser (`god_of_war_browser -iso GoW2.iso -ps ps2 -gowversion 2`, http://localhost:8000)
+open the level WAD in the left tree; every tag row has a **download** arrow
+(`/dump/pack/<LEVEL>.WAD/<tagId>`) and an **upload** button (`/upload/pack/<LEVEL>.WAD/<tagId>`).
+Uploading a tag of a different size is fine: the browser rebuilds the WAD, re-pads every tag to 16
+bytes and writes the file into free pak space with a new TOC entry. The whole-file arrow at the top
+of the tree downloads/uploads the complete WAD. Back up by downloading the whole file first.
+
+Tags to touch, by name as the tree shows them (ids differ per level; ATLAS220 ids in brackets):
+
+| tag (tree name) | type | what to edit |
+|---|---|---|
+| `RSRCS` [3334] | 0x12 | 24-byte creature names; replace a name, zero-pad |
+| `DC_WAD_<level>` 2nd of 6 [3336] | 0x0c | pool entries `{hash u32, count u32}` after the `WAD_<level>` header |
+| `DC_WAD_<level>` 3rd [3337] | 0x0d | top-level offsets: shift any offset after the pools by the size delta |
+| `DC_WAD_<level>` 4th [3338] | 0x0e | import offsets: same shift (often empty = `00 00 00 00`) |
+| `DC_WAD_<level>` 5th [3339] | 0x0f | hash->name table: optional, game ignores it |
+| `DC_WAD_<level>` 6th [3340] | 0x10 | field table: shift offsets after the pools, add/remove `tGOPool_N`/`tMemoryPool_N` rows |
+| `ESC_<spawner>` [748] | 0x01 | `CRT_<Creature>` / `BRA_*` strings, spawn count, gate constants |
+
+### 10.1 Same-shape swap (no offset work)
+
+Pick a replacement with the same `GO+MEM` shape as the creature you replace (see `DONORS.md`;
+e.g. Orders02 / Orders10 / Orders00 are all 13+13). Then:
+
+1. `RSRCS`: overwrite the 24-byte name (`53 61 74 79 72 31 30 00 ...` -> `4f 72 64 65 72 73 30 32 00 ...`).
+2. Donor level, `DC_WAD` 0x0c: find the donor creature's block. Locate `go<Creature>` by its hash
+   (`docs/POOL_HASHES.md`, bytes column); the GO entries follow one another, the MEM block comes
+   after all GO entries of the level and ends with `fxBoneData` (`00 dd 01 79`). Copy the 8-byte
+   entries.
+3. Target level, 0x0c: paste over the old creature's entries, same positions, scaling counts to the
+   target N (donor count / donor N * N; `fxBoneData` stays 1).
+4. Every `ESC_*` spawner that pushes `CRT_<Old>`: overwrite with `CRT_<New>` + `00`. Only possible in
+   place if the new name is not longer; otherwise see 10.3.
+5. Upload the three tags. Done. Header words and all offsets are untouched.
+
+### 10.2 Different shape: the ATLAS220 example (Satyr10 9+13 -> Orders02 13+13, delta +32 bytes)
+
+Original offsets are inside the 0x0c payload (tag 3336, 1028 bytes). The `WAD_Atlas220` object is
+at `+0x84`; GO entries run from `+0x8c`, MEM entries from `+0x1a4`, other objects from `+0x2a4`.
+
+| where | old bytes | new bytes | why |
+|---|---|---|---|
+| 0x0c `+0x84` header | `23 80 00 00 20 c0 11 00` | `27 80 00 00 20 c0 13 00` | nGO 35->39: word1 = `0x8000|nGO`; word2 = `nGO<<15 | 0x4000 | nMem` (nMem 32 unchanged) |
+| 0x0c `+0x14c..+0x193` (Satyr GO, 9 entries) | `56 06 b6 5c 02 00 00 00` ... | 13 entries: `0f 02 b4 28 02 00 00 00` (goOrders02 x2), `42 ab 07 4f 04 00 00 00` (goStoneOrders00 x4), `84 68 88 8b 02 ..`, `33 4a 25 5b 02 ..`, `b4 4e 95 71 02 ..`, `08 ec b8 59 02 ..`, `09 ec b8 59 02 ..`, `af f7 24 16 02 ..`, `02 e0 56 fc 02 ..`, `06 ae be 7b 02 ..`, `1c dd c0 bd 02 ..`, `2d 64 10 19 02 ..`, `4f 68 04 44 02 ..` | insert 4 extra entries; everything after moves +32 |
+| 0x0c MEM block (was `+0x23c`, now `+0x25c`) | Satyr systems | `5e 12 d4 28 06 00 00 00` (odbEffect x6), hfsmEnemy1 x2, goSoldier x2, tAnimSystem x2, tMoveSystem x2, tFightSystem x2, tStandardEffectSystem x2, hfsmBreakable x4, tHandleSystem x4, goIO x4, hfsmIO_Misc x4, tMove x4, `00 dd 01 79 01 00 00 00` | same 13 entries, scaled to N=2 |
+| 0x0d entries | `IO_PUSH_HALL 0x2a4`, `IO_PUSH_HEAD 0x348`, `BRK_AtlasSpike 0x3ec` | `0x2c4`, `0x368`, `0x40c` | +32 on every offset >= old end of pools |
+| 0x0e | `00 00 00 00` | unchanged | no imports in this level |
+| 0x10 | 84 rows | 88 rows; `tGOPool_*` rows for the 4 new entries, all later offsets +32 | rows are `{offset, nameOffset, typeId}`; type `e3` for GO pools, `e4` for MEM pools; string table follows the rows, so adding rows shifts all nameOffsets by 12 per row |
+| 0x0f | 51 pairs | 55 pairs | optional (debug names) |
+| `ESC_gosatyr` tag 748, `+0x76` | `4b 00` (streamSize 75) | `4c 00` | string grew by 1 byte |
+| same tag, `+0xdb` | `43 52 54 5f 53 61 74 79 72 31 30 00` `CRT_Satyr10` | `43 52 54 5f 4f 72 64 65 72 73 30 32 00` `CRT_Orders02` | entity size stays `d8 00` because the 4-byte padding absorbed it |
+
+Rule for 0x10 by hand: rebuild it rather than patch it. Row i = `off_i, 4 + 12*rows + sum(len(name_j)+1 for j<i), type_i`,
+names appended in order, whole payload padded to 4. The 0x0f table is `count, {hash, strOff}`
+sorted by hash with the same string layout; leaving it stale does not break the game.
+
+### 10.3 ESC spawner edits
+
+Entity layout and the string rule are in 3.4. Practical cases:
+
+- Same or shorter creature name: overwrite the string in place, terminate with `00`.
+- Longer name: the string area grows. Rewrite the string area, add the growth to `streamSize`
+  (u16 at entity `+0x52`) and, if the entity crosses a 4-byte boundary, to `entitySize` (u16 at
+  `+0x44`); fix every `0e xx xx` operand that points past the grown string; upload the tag.
+- Spawn count: handler 0 and 1 are `01 <i32> 38 3a`; edit the 4 bytes (RHOD10 example: tag 678,
+  `FirstRoomAI-Soldir00AI6`, count `03 00 00 00` at entity `+0x..` printed by `dump`).
+- Gate constants: level-data entities (`WayLevelData1/2`), one `01 <i32> 07 03 vv` per variable;
+  RHOD10 file offsets in 7, e.g. total gate `15 00 00 00` at `0xB66CB` of the shipped file.
+- Bypass a condition: overwrite the handler's first 3 bytes with `11 38 3a`.
+- Remove a spawner: count and alive `00 00 00 00`; if the spawner has no handler 0/1 use the tool
+  (it injects the handler) or repoint its `CRT_` to a creature you keep.
+
+### 10.4 Finding donor data in the browser
+
+1. `docs/DONORS.md` lists for every creature which levels use it, the N there, the block shape and
+   the WAD size.
+2. Open the donor level WAD in the browser, download its 2nd `DC_WAD` tag (0x0c) and its 6th
+   (0x10). In 0x10 the `tGOPool_N` row whose offset points at the `go<Creature>` hash starts the
+   block; copy 8-byte entries from 0x0c from there.
+3. Hashes: `docs/POOL_HASHES.md` (1587 names seen in the shipped levels) or compute
+   `h = h*127 + c` over the upper-cased name.
+4. The creature WAD itself (`R_<NAME>.WAD`) needs no edits; its `CRT_*` and `BRA_*` templates are
+   listed in its 3rd `DC_WAD` tag (0x0d) if you need to check a behaviour exists.
+5. Stay within the memory budget (section 8): compare `R_*.WAD` sizes in `DONORS.md`.

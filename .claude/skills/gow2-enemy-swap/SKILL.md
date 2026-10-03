@@ -32,3 +32,6 @@ Quick facts an agent needs before touching anything:
 - Removing an enemy = spawner count/alive set to 0 (injected if absent) + CRT repointed to a
   surviving creature; never delete entities. Creature then drops out of RSRCS/pools automatically;
   total gate must follow (`auto_total`). Manual section 9.
+- Hand editing with only a hex editor + the browser: manual section 10 (per-tag download/upload in
+  the browser, same-shape swap recipe, ATLAS220 byte-level example), `docs/DONORS.md` (which level
+  has which creature), `docs/POOL_HASHES.md` (name -> hash bytes).
