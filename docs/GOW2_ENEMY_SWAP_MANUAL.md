@@ -250,3 +250,21 @@ overwrites the first three bytes of every condition handler that compares the va
 chain fires on the first destruction event. Use it (a) to progress while testing creatures and
 (b) as a diagnostic: if the door still does not open with everything bypassed, the death sensors
 are not firing for that creature at all.
+
+## 8. Memory budget (confirmed in game)
+
+The PS2 build has no slack. Symptoms of running out, in order: effects and secondary attacks
+silently fail to spawn (a ported Medusa fought but never fired her gaze), then a TLB miss on load.
+Both were reproduced on RHOD10 and fixed purely by lowering the budget:
+
+| build | creature WAD payload | result |
+|-------|---------------------|--------|
+| shipped RHOD10 (Colsus00 + Rhsold00 + Orders10) | 4351 KB | baseline |
+| Rhsold00 -> Satyr10 | 4597 KB (+6%) | worked |
+| soldiers kept + Orders10 kept + Medusa00 added | 5662 KB (+30%) | no beam, then TLB miss |
+| Colsus00 + Medusa00 only, pools N=6 | 4276 KB (-2%) | Medusas beam |
+
+Rules: stay at or below the shipped creature payload (the UI's Memory card shows shipped / ISO /
+planned); when adding a big creature, drop one rather than keeping it for a few scripted spawners;
+keep pool N at the real concurrent demand, not the old N; pools and the level WAD add on top of
+the creature payload. `R_*.WAD` sizes are in `cache/index.json` (`creatures.<name>.bytes`).

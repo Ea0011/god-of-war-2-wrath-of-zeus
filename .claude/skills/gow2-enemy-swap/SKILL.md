@@ -26,3 +26,6 @@ Quick facts an agent needs before touching anything:
   tool and the UI's Progression gates card edit them in place (manual section 7). Never bulk-assign
   scripted entities (bosses, door soldiers) and never let a replacement's pool N drop below the
   original, or sensors stop firing and gates never open.
+- Memory is the first suspect for "it spawned but does not do X" and for TLB misses: keep the
+  creature WAD payload at or below the shipped level (UI Memory card, manual section 8). Confirmed:
+  Medusa beamed only once the level went from +30% to -2% of the shipped budget.
