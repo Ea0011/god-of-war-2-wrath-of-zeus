@@ -670,6 +670,9 @@ def apply_plan(tags, plan, creature_db, log=print):
        creature_db = {Creature: {bra: [...], block: {n, go: [[h,c,name]], mem: [[h,c,name]]} or None}}"""
     assign = {tuple(k.split(':', 1)) if isinstance(k, str) else k: v for k, v in plan.get('assign', {}).items()}
     assign = {(int(a), b): v for (a, b), v in assign.items()}
+    removed_keys = set(plan.get('remove', []))
+    removed_set = {(int(k.split(':', 1)[0]), k.split(':', 1)[1]) for k in removed_keys}
+    assign = {k: v for k, v in assign.items() if k not in removed_set}
     counts = dict(plan.get('counts', {}))
     fallback = plan.get('bra_fallback', 'BRA_Spawn')
     extra = dict(plan.get('renames', {}))
@@ -681,7 +684,7 @@ def apply_plan(tags, plan, creature_db, log=print):
             for e in iter_entities(t.data):
                 name, strs, _ = entity_strings(e)
                 crt = [s[4:] for _, s in strs if s.startswith('CRT_')]
-                if crt:
+                if crt and (i, name) not in removed_set:
                     cur = assign.get((i, name), crt[0])
                     usage[cur] = usage.get(cur, 0) + 1
                     if cur != crt[0]:
@@ -746,6 +749,13 @@ def apply_plan(tags, plan, creature_db, log=print):
         r.data = rsrcs_build(names)
     log(f'RSRCS: {names}')
 
+    if removed_keys:
+        disable_spawners(tags, removed_keys, log=log)
+        live = [c for c in names if usage.get(c)]
+        survivor = max(live, key=lambda c: usage[c]) if live else None   # most-used creature, never a one-off boss
+        if survivor:
+            for (i, name) in removed_set:
+                assign[(i, name)] = survivor     # keeps the CRT_ lookup valid while count is 0
     total = 0
     for i, t in enumerate(tags):
         if not is_entities_script(t):
@@ -772,13 +782,21 @@ def apply_plan(tags, plan, creature_db, log=print):
     nsp = apply_spawns(tags, plan.get('spawns', {}), log=log) if plan.get('spawns') else 0
     ngates = apply_gates(tags, plan.get('gates', {}), log=log) if plan.get('gates') else 0
     nby = bypass_gates(tags, plan.get('bypass', []), log=log) if plan.get('bypass') else 0
+    if plan.get('auto_total'):
+        fix = {}
+        for rep in gate_report(tags):
+            cur = next(g['init'] for g in level_gates(tags) if g['var'] == rep['var'])
+            if cur != rep['spawn_total'] and rep['var'] not in {int(v, 0) if isinstance(v, str) else int(v) for v in plan.get('bypass', [])}:
+                fix[rep['var']] = rep['spawn_total']
+        if fix:
+            apply_gates(tags, fix, log=log); ngates += len(fix)
     for rep in gate_report(tags):
         if plan.get('bypass') and rep['var'] in {int(v, 0) if isinstance(v, str) else int(v) for v in plan['bypass']}:
             continue
         cur = next(g['init'] for g in level_gates(tags) if g['var'] == rep['var'])
         if cur != rep['spawn_total']:
             log(f"WARNING: total gate LevelData[{rep['var']:#x}] = {cur} but its spawners will produce {rep['spawn_total']} kills (== check): set it to {rep['spawn_total']}")
-    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates, spawns_changed=nsp, bypassed=nby)
+    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates, spawns_changed=nsp, bypassed=nby, removed_spawners=len(removed_keys))
 
 
 # ============================================================================ progression gates
@@ -1022,4 +1040,56 @@ def bypass_gates(tags, vars_, log=print):
             epos += len(e)
         if changed:
             t.data = bytes(data)
+    return n
+
+
+# ============================================================================ spawner removal
+def add_const_handler(e, hid, value):
+    """Return a copy of entity `e` with a new handler `hid` whose code is `push_int value; pop_result; exit`.
+    Header grows by 4 bytes (handler table), the code region by 7 bytes; string offsets are fixed."""
+    name, strs, L = entity_strings(e)
+    hc, tc = L['hc'], L['tc']
+    handlers, ostart = entity_handlers(e)
+    stream, code_end = L['stream'], L['code_end']
+    newcode = bytearray(stream[:code_end]) + bytes([0x01]) + struct.pack('<i', int(value)) + b'\x38\x3a'
+    shift = len(newcode) - code_end
+    strings = bytearray(stream[code_end:])
+    newstream = newcode + strings
+    for r, _ in strs:                       # 0x0e operands point into the string area
+        struct.pack_into('<H', newstream, r, u16(stream, r) + shift)
+    hstart = 0x54
+    table = bytearray(e[hstart:hstart + hc * 4]) + struct.pack('<HH', hid, code_end)
+    targets = e[hstart + hc * 4:hstart + hc * 4 + tc * 2 + 2]
+    tail = e[L['textstart']:L['textstart'] + len(name) + 1]
+    ne = bytearray(e[:hstart]) + table + targets + newstream + tail
+    ne += b'\0' * (align(len(ne), 4) - len(ne))
+    struct.pack_into('<H', ne, 0x44, len(ne))
+    struct.pack_into('<H', ne, 0x4E, hc + 1)
+    struct.pack_into('<H', ne, 0x52, 2 + len(newstream))
+    return bytes(ne)
+
+
+def disable_spawners(tags, keys, log=print):
+    """Make spawners never spawn: handler 0 (count) and 1 (alive) set to 0, injected if missing."""
+    want = {}
+    for k in keys:
+        ti, name = k.split(':', 1); want.setdefault(int(ti), set()).add(name)
+    n = 0
+    for ti, names in want.items():
+        t = tags[ti]
+        out = bytearray(t.data[:0x24])
+        for e in iter_entities(t.data):
+            nm = entity_strings(e)[0]
+            if nm in names:
+                ch = entity_const_handlers(e)
+                ne = bytearray(e)
+                for hid in (0, 1):
+                    if hid in ch:
+                        struct.pack_into('<i', ne, ch[hid][1], 0)
+                    else:
+                        ne = bytearray(add_const_handler(bytes(ne), hid, 0))
+                log(f'removed spawner {nm}: spawn count 0 / alive 0' + ('' if 0 in ch else ' (handlers injected)'))
+                e = bytes(ne); n += 1
+            out += e
+        t.data = bytes(out)
     return n

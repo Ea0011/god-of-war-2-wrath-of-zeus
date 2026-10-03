@@ -269,3 +269,21 @@ Rules: stay at or below the shipped creature payload (the UI's Memory card shows
 planned); when adding a big creature, drop one rather than keeping it for a few scripted spawners;
 keep pool N at the real concurrent demand, not the old N; pools and the level WAD add on top of
 the creature payload. `R_*.WAD` sizes are in `cache/index.json` (`creatures.<name>.bytes`).
+
+## 9. Removing enemies
+
+A spawner is removed by making it inert, not by deleting the entity (other entities hold its id
+in their target lists; a dangling id is a crash risk): handler 0 (spawn count) and handler 1
+(alive) are set to 0, and injected (`01 00000000 38 3A`, handler table grows by one row) when the
+spawner has none, as the starters do. Its `CRT_` string is repointed to the most-used creature
+that remains loaded so no lookup can miss. Once no live spawner references a creature it leaves
+RSRCS and its pool block is cut, which frees the creature WAD and the pools.
+
+Death sensors of an inert spawner never fire, so the `==` total gate must shrink accordingly; the
+UI's "keep the total gate equal to the planned spawn total" option (plan `auto_total`) does that,
+and the consistency line shows the arithmetic. Wave thresholds (`>=`) still need sum <= total.
+
+UI: pick "remove (never spawns)" in a spawner's "replace with" list. CLI/API: plan `remove:
+["tag:entity", ...]`. Verified on RHOD10: removing the three starters and the two Orders10
+spawners drops Orders10 from RSRCS, injects count handlers into the starters, and the total goes
+21 -> 13; the result round-trips byte-exact through the parser.

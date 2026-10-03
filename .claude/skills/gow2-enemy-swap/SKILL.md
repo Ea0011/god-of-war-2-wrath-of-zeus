@@ -29,3 +29,6 @@ Quick facts an agent needs before touching anything:
 - Memory is the first suspect for "it spawned but does not do X" and for TLB misses: keep the
   creature WAD payload at or below the shipped level (UI Memory card, manual section 8). Confirmed:
   Medusa beamed only once the level went from +30% to -2% of the shipped budget.
+- Removing an enemy = spawner count/alive set to 0 (injected if absent) + CRT repointed to a
+  surviving creature; never delete entities. Creature then drops out of RSRCS/pools automatically;
+  total gate must follow (`auto_total`). Manual section 9.
