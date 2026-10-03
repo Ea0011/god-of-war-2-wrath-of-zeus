@@ -156,14 +156,26 @@ def budget(rsrcs, db=None):
     return dict(rows=rows, total=sum(b or 0 for _, b in rows), unknown=[c for c, b in rows if b is None])
 
 
+def base_path(name):
+    """Plans are always applied to the shipped original (the backup) so they are complete and
+    reversible; the ISO copy is only inspected."""
+    bk = os.path.join(BACKUPS, name + '.orig')
+    return bk if os.path.exists(bk) else fetch_wad(name)
+
+
 def level_load(name, force=False):
     p = fetch_wad(name, force)
-    tags = G.read_wad(p)
-    info = G.level_info(tags)
-    info['budget'] = budget(info['rsrcs'])
-    bk0 = os.path.join(BACKUPS, name + '.orig')
-    if os.path.exists(bk0):
-        info['budget_original'] = budget(G.level_info(G.read_wad(bk0))['rsrcs'])
+    iso_tags = G.read_wad(p)
+    iso_info = G.level_info(iso_tags)
+    base = base_path(name)
+    info = G.level_info(G.read_wad(base)) if base != p else iso_info
+    info['base'] = 'shipped original (backup)' if base != p else 'ISO copy (no backup yet, so this is the shipped level)'
+    info['iso'] = dict(rsrcs=iso_info['rsrcs'], size=os.path.getsize(p),
+                       sha256=hashlib.sha256(open(p, 'rb').read()).hexdigest(),
+                       creatures={k: (v and v['n']) for k, v in iso_info['creatures'].items()},
+                       modified=hashlib.sha256(open(p, 'rb').read()).hexdigest() != hashlib.sha256(open(base, 'rb').read()).hexdigest())
+    info['budget'] = budget(iso_info['rsrcs'])
+    info['budget_original'] = budget(info['rsrcs'])
     info['file'] = p; info['size'] = os.path.getsize(p)
     info['sha256'] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     bk = os.path.join(BACKUPS, name + '.orig')
@@ -174,7 +186,8 @@ def level_load(name, force=False):
 def level_apply(name, plan, upload):
     log = []
     p = fetch_wad(name)
-    tags = G.read_wad(p)
+    tags = G.read_wad(base_path(name))
+    log.append('base: ' + ('shipped original' if base_path(name) != p else 'ISO copy'))
     res = G.apply_plan(tags, plan, creature_db(), log=log.append)
     b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}" + (f" (unknown size: {b['unknown']})" if b['unknown'] else ''))
     data = G.write_wad(tags)
@@ -260,7 +273,7 @@ class H(BaseHTTPRequestHandler):
                     threading.Thread(target=scan_worker, args=(body.get('levels', r'^[A-Z]+\d+\.WAD$'),), daemon=True).start()
                 self._json(STATE['scan'])
             elif self.path == '/api/preview':
-                tags = G.read_wad(fetch_wad(body['name'])); log = []
+                tags = G.read_wad(base_path(body['name'])); log = []
                 res = G.apply_plan(tags, body['plan'], creature_db(), log=log.append)
                 b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}")
                 res['log'] = log; res['budget'] = b; res['wad_bytes'] = len(G.write_wad(tags)); self._json(res)
