@@ -277,7 +277,7 @@ class H(BaseHTTPRequestHandler):
 
     def _json(self, obj, code=200):
         b = json.dumps(obj).encode()
-        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.send_header('Cache-Control', 'no-store'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
 
     def _err(self, e):
         self._json(dict(error=str(e)), 500)
@@ -287,7 +287,7 @@ class H(BaseHTTPRequestHandler):
         try:
             if u.path == '/':
                 b = open(os.path.join(HERE, 'gow2_swap_ui.html'), 'rb').read()
-                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+                self.send_response(200); self.send_header('Content-Type', 'text/html; charset=utf-8'); self.send_header('Cache-Control', 'no-store'); self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
             elif u.path == '/api/status':
                 try:
                     pack_list(); ok = True

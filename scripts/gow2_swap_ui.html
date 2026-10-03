@@ -112,7 +112,17 @@ function render(){savePlan();const nch=Object.keys(ASSIGN).length+Object.keys(CO
  $('#enctable').querySelectorAll('select[data-enc]').forEach(s=>s.onchange=()=>{if(!s.value)return;const enc=INFO.encounters.find(x=>x.tag==s.dataset.enc);let skipped=0;for(const e of enc.entities){if(isScripted(e)){skipped++;continue;}const k=enc.tag+':'+e.name;if(s.value===e.crt)delete ASSIGN[k];else ASSIGN[k]=s.value;}if(skipped)log(`${enc.script}: left ${skipped} scripted entit${skipped>1?'ies':'y'} unchanged (change them row by row if you really mean it)`);render();});
  $('#creatures').hidden=$('#encs').hidden=$('#actions').hidden=false;$('#bk').textContent=INFO.backup?'backup: '+INFO.backup:'no backup yet (one is saved on first upload)';}
 function plan(){return {assign:ASSIGN,counts:COUNTS,gates:GATES,spawns:SPAWNS,bypass:[...BYPASS],remove_unused:$('#rmunused').checked,bra_fallback:$('#fallback').value||'BRA_Spawn'};}
-async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL}`);try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));(r.log||[]).forEach(l=>log('  '+l));if(r.wad_bytes){LASTWAD=r.wad_bytes;render();}if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);if(path==='/api/apply'&&extra.upload){await load(true,true);log('ISO updated. The table still shows your plan on top of the shipped level (that is the editing base); the header line shows what the ISO holds.');}if(path==='/api/restore'){clearPlan();await load(true);}}catch(e){log('ERROR: '+e.message)}btns.forEach(b=>b.disabled=false);}
+async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL} (sending plan with ${Object.keys(ASSIGN).length} assignments…)`);const t0=Date.now();
+ try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));log(`  server replied in ${((Date.now()-t0)/1000).toFixed(1)}s`);(r.log||[]).forEach(l=>log('  '+l));
+  try{if(r.wad_bytes){LASTWAD=r.wad_bytes;render();}}catch(e){log('  (render after reply failed: '+e.message+')')}
+  if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');
+  if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);
+  if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);
+  if(path==='/api/apply'&&extra.upload){log('  reloading level state from the ISO…');await load(true,true);log('done. The table shows your plan on top of the shipped level (the editing base); the header shows what the ISO holds.');}
+  if(path==='/api/restore'){clearPlan();await load(true);log('done.');}
+ }catch(e){log('ERROR: '+(e&&e.message||e));console.error(e)}
+ finally{btns.forEach(b=>b.disabled=false);}}
+window.addEventListener('error',e=>log('PAGE ERROR: '+e.message+' @'+(e.lineno||'')));window.addEventListener('unhandledrejection',e=>log('PAGE ERROR: '+(e.reason&&e.reason.message||e.reason)));
 $('#bypassall').onclick=()=>{for(const g of INFO.gates||[])if(g.role==='threshold')BYPASS.add(g.var);renderGates();};$('#bypassnone').onclick=()=>{BYPASS=new Set();renderGates();};
 $('#rmunused').onchange=()=>render();
 $('#resetplan').onclick=()=>{clearPlan();render();log('plan cleared (shipped level)');};
