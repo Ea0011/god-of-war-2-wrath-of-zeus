@@ -53,6 +53,7 @@ pre{background:color-mix(in srgb,var(--line) 30%,transparent);padding:10px;borde
  <button id="apply">Write .mod.WAD only</button>
  <button id="upload" class="primary">Apply &amp; upload into ISO</button>
  <button id="restore">Restore original from backup</button>
+ <button id="resetplan">Reset plan</button>
  <span id="bk" class="mut"></span>
 </div>
 <div class="card"><b>Log</b><pre id="log">—</pre></div>
@@ -65,7 +66,10 @@ async function status(){try{const s=await api('/api/status');$('#st').innerHTML=
  const sc=s.scan;$('#scanst').textContent=sc.running?`scanning ${sc.done}/${sc.total} ${sc.msg}`:(sc.error?'scan error: '+sc.error:'');if(sc.running)setTimeout(status,1500);else if(sc.msg==='done'&&!DBloaded)loadDB();}catch(e){$('#st').textContent='ui server error: '+e.message}}
 let DBloaded=false;async function loadDB(){DB=await api('/api/creatures'+(LEVEL?'?level='+LEVEL:''));DBloaded=true;if(INFO)render();}
 async function levels(){const l=await api('/api/levels');$('#level').innerHTML=l.map(n=>`<option>${n}</option>`).join('');}
-async function load(force){LEVEL=$('#level').value;$('#lvlinfo').textContent='downloading…';try{INFO=await api(`/api/level?name=${LEVEL}${force?'&force=1':''}`);ASSIGN={};COUNTS={};GATES={};SPAWNS={};BYPASS=new Set();LASTWAD=null;await loadDB();render();}catch(e){log('load failed: '+e.message)}}
+function savePlan(){try{localStorage.setItem('gow2plan:'+LEVEL,JSON.stringify({assign:ASSIGN,counts:COUNTS,gates:GATES,spawns:SPAWNS,bypass:[...BYPASS]}));}catch(e){}}
+function restorePlan(){try{const p=JSON.parse(localStorage.getItem('gow2plan:'+LEVEL)||'null');if(!p)return false;ASSIGN=p.assign||{};COUNTS=p.counts||{};GATES=p.gates||{};SPAWNS=p.spawns||{};BYPASS=new Set(p.bypass||[]);return Object.keys(ASSIGN).length+Object.keys(COUNTS).length+Object.keys(GATES).length+Object.keys(SPAWNS).length+BYPASS.size>0;}catch(e){return false}}
+function clearPlan(){ASSIGN={};COUNTS={};GATES={};SPAWNS={};BYPASS=new Set();LASTWAD=null;try{localStorage.removeItem('gow2plan:'+LEVEL)}catch(e){}}
+async function load(force,keepPlan){const newLevel=$('#level').value;const same=newLevel===LEVEL;LEVEL=newLevel;$('#lvlinfo').textContent='downloading…';try{INFO=await api(`/api/level?name=${LEVEL}${force?'&force=1':''}`);if(!(keepPlan&&same)){clearPlan();if(restorePlan())log(`restored your unsaved plan for ${LEVEL} from this browser (Reset plan to discard)`);}await loadDB();render();}catch(e){log('load failed: '+e.message)}}
 function creatureOptions(cur){const names=new Set([...Object.keys(DB),...INFO.rsrcs,cur]);return [...names].sort().map(n=>{const c=DB[n]||{};const ok=INFO.rsrcs.includes(n)||c.block;return `<option value="${n}" ${n===cur?'selected':''} ${ok?'':'disabled'}>${n}${ok?'':' (no donor)'}</option>`}).join('');}
 
 let LASTWAD=null;
@@ -91,7 +95,7 @@ function renderGates(){const gs=(INFO.gates||[]).filter(g=>g.role==='threshold'|
  $('#gatetable').querySelectorAll('input[data-by]').forEach(c=>c.onchange=()=>{const v=+c.dataset.by;if(c.checked)BYPASS.add(v);else BYPASS.delete(v);renderGates();});
  $('#gatetable').querySelectorAll('button[data-fix]').forEach(b=>b.onclick=()=>{const g=INFO.gates.find(x=>x.var==b.dataset.fix);if(+b.dataset.v===g.init)delete GATES[g.var];else GATES[g.var]=+b.dataset.v;render();});
  $('#gatetable').querySelectorAll('input').forEach(i=>i.onchange=()=>{const g=INFO.gates.find(x=>x.var==i.dataset.g);if(+i.value===g.init)delete GATES[g.var];else GATES[g.var]=+i.value;renderGates();});}
-function render(){$('#lvlinfo').innerHTML=`editing base: <b>${INFO.base}</b> · RSRCS ${INFO.rsrcs.join(', ')} · ISO copy ${INFO.iso&&INFO.iso.modified?'<span class="warn">MODIFIED</span> ('+Object.entries(INFO.iso.creatures).map(([c,n])=>c+(n?' N='+n:'')).join(', ')+')':'<span class="ok">unmodified</span>'}`;renderGates();
+function render(){savePlan();const nch=Object.keys(ASSIGN).length+Object.keys(COUNTS).length+Object.keys(GATES).length+Object.keys(SPAWNS).length+BYPASS.size;$('#lvlinfo').innerHTML=`plan: <b class="${nch?'warn':'mut'}">${nch?nch+' change'+(nch>1?'s':''):'none'}</b> · editing base: <b>${INFO.base}</b> · RSRCS ${INFO.rsrcs.join(', ')} · ISO copy ${INFO.iso&&INFO.iso.modified?'<span class="warn">MODIFIED</span> ('+Object.entries(INFO.iso.creatures).map(([c,n])=>c+(n?' N='+n:'')).join(', ')+')':'<span class="ok">unmodified</span>'}`;renderGates();
  const used={};for(const enc of INFO.encounters)for(const e of enc.entities){const c=ASSIGN[enc.tag+':'+e.name]||e.crt;used[c]=(used[c]||0)+1;}
  const all=[...new Set([...INFO.rsrcs,...Object.keys(used)])];
  renderMemory(all,used);
@@ -108,9 +112,10 @@ function render(){$('#lvlinfo').innerHTML=`editing base: <b>${INFO.base}</b> · 
  $('#enctable').querySelectorAll('select[data-enc]').forEach(s=>s.onchange=()=>{if(!s.value)return;const enc=INFO.encounters.find(x=>x.tag==s.dataset.enc);let skipped=0;for(const e of enc.entities){if(isScripted(e)){skipped++;continue;}const k=enc.tag+':'+e.name;if(s.value===e.crt)delete ASSIGN[k];else ASSIGN[k]=s.value;}if(skipped)log(`${enc.script}: left ${skipped} scripted entit${skipped>1?'ies':'y'} unchanged (change them row by row if you really mean it)`);render();});
  $('#creatures').hidden=$('#encs').hidden=$('#actions').hidden=false;$('#bk').textContent=INFO.backup?'backup: '+INFO.backup:'no backup yet (one is saved on first upload)';}
 function plan(){return {assign:ASSIGN,counts:COUNTS,gates:GATES,spawns:SPAWNS,bypass:[...BYPASS],remove_unused:$('#rmunused').checked,bra_fallback:$('#fallback').value||'BRA_Spawn'};}
-async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL}`);try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));(r.log||[]).forEach(l=>log('  '+l));if(r.wad_bytes){LASTWAD=r.wad_bytes;render();}if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);if(path==='/api/apply'&&extra.upload||path==='/api/restore')await load(true);}catch(e){log('ERROR: '+e.message)}btns.forEach(b=>b.disabled=false);}
+async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL}`);try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));(r.log||[]).forEach(l=>log('  '+l));if(r.wad_bytes){LASTWAD=r.wad_bytes;render();}if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);if(path==='/api/apply'&&extra.upload){await load(true,true);log('ISO updated. The table still shows your plan on top of the shipped level (that is the editing base); the header line shows what the ISO holds.');}if(path==='/api/restore'){clearPlan();await load(true);}}catch(e){log('ERROR: '+e.message)}btns.forEach(b=>b.disabled=false);}
 $('#bypassall').onclick=()=>{for(const g of INFO.gates||[])if(g.role==='threshold')BYPASS.add(g.var);renderGates();};$('#bypassnone').onclick=()=>{BYPASS=new Set();renderGates();};
 $('#rmunused').onchange=()=>render();
+$('#resetplan').onclick=()=>{clearPlan();render();log('plan cleared (shipped level)');};
 $('#scan').onclick=async()=>{await api('/api/scan',{});status();};$('#load').onclick=()=>load(false);$('#reload').onclick=()=>load(true);
 $('#preview').onclick=()=>run('/api/preview',{},'preview');$('#apply').onclick=()=>run('/api/apply',{upload:false},'write');
 $('#upload').onclick=()=>{if(confirm(`Write ${LEVEL} into the ISO? The original is backed up on first upload.`))run('/api/apply',{upload:true},'apply+upload');};
