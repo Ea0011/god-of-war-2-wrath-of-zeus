@@ -197,7 +197,7 @@ def level_apply(name, plan, upload):
         if ok:
             open(p, 'wb').write(data)   # cache now holds what the ISO holds
         res['uploaded'] = ok
-    res['output'] = outp; res['sha256'] = sha; res['log'] = log
+    res['output'] = outp; res['sha256'] = sha; res['log'] = log; res['wad_bytes'] = len(data); res['budget'] = b
     return res
 
 
@@ -263,7 +263,7 @@ class H(BaseHTTPRequestHandler):
                 tags = G.read_wad(fetch_wad(body['name'])); log = []
                 res = G.apply_plan(tags, body['plan'], creature_db(), log=log.append)
                 b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}")
-                res['log'] = log; res['budget'] = b; self._json(res)
+                res['log'] = log; res['budget'] = b; res['wad_bytes'] = len(G.write_wad(tags)); self._json(res)
             elif self.path == '/api/apply':
                 self._json(level_apply(body['name'], body['plan'], bool(body.get('upload'))))
             elif self.path == '/api/restore':

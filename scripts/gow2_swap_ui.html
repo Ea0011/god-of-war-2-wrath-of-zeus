@@ -30,10 +30,14 @@ pre{background:color-mix(in srgb,var(--line) 30%,transparent);padding:10px;borde
 </div>
 <div class="card" id="creatures" hidden>
  <div class="row"><b>Creatures in this level</b><span class="mut">N = max simultaneous instances (pool size). Change a number to rescale pools.</span></div>
- <div id="budget" class="mut" style="margin:4px 0 8px"></div>
  <div id="clist" class="row"></div>
  <div class="row" style="margin-top:8px"><label><input type="checkbox" id="rmunused" checked> remove creatures that no spawner references any more</label>
  <label>fallback behaviour <input id="fallback" value="BRA_Spawn" size="12"></label></div>
+</div>
+<div class="card" id="memcard" hidden>
+ <div class="row"><b>Memory before / after</b><span class="mut">creature WAD payload streamed with the level (pools and the level WAD itself come on top; PS2 has 32 MB). Rule of thumb from testing: at or below the shipped total loads fine, +30% gave a TLB miss.</span></div>
+ <table id="memtable"></table>
+ <div id="memwad" class="mut" style="margin-top:6px"></div>
 </div>
 <div class="card" id="encs" hidden>
  <div class="row"><b>Encounters</b><span class="mut">one row per spawner entity; pick a replacement per entity or per whole script</span></div>
@@ -61,8 +65,21 @@ async function status(){try{const s=await api('/api/status');$('#st').innerHTML=
  const sc=s.scan;$('#scanst').textContent=sc.running?`scanning ${sc.done}/${sc.total} ${sc.msg}`:(sc.error?'scan error: '+sc.error:'');if(sc.running)setTimeout(status,1500);else if(sc.msg==='done'&&!DBloaded)loadDB();}catch(e){$('#st').textContent='ui server error: '+e.message}}
 let DBloaded=false;async function loadDB(){DB=await api('/api/creatures'+(LEVEL?'?level='+LEVEL:''));DBloaded=true;if(INFO)render();}
 async function levels(){const l=await api('/api/levels');$('#level').innerHTML=l.map(n=>`<option>${n}</option>`).join('');}
-async function load(force){LEVEL=$('#level').value;$('#lvlinfo').textContent='downloading…';try{INFO=await api(`/api/level?name=${LEVEL}${force?'&force=1':''}`);ASSIGN={};COUNTS={};GATES={};SPAWNS={};BYPASS=new Set();await loadDB();render();}catch(e){log('load failed: '+e.message)}}
+async function load(force){LEVEL=$('#level').value;$('#lvlinfo').textContent='downloading…';try{INFO=await api(`/api/level?name=${LEVEL}${force?'&force=1':''}`);ASSIGN={};COUNTS={};GATES={};SPAWNS={};BYPASS=new Set();LASTWAD=null;await loadDB();render();}catch(e){log('load failed: '+e.message)}}
 function creatureOptions(cur){const names=new Set([...Object.keys(DB),...INFO.rsrcs,cur]);return [...names].sort().map(n=>{const c=DB[n]||{};const ok=INFO.rsrcs.includes(n)||c.block;return `<option value="${n}" ${n===cur?'selected':''} ${ok?'':'disabled'}>${n}${ok?'':' (no donor)'}</option>`}).join('');}
+
+let LASTWAD=null;
+function renderMemory(all,used){const kb=b=>b==null?'?':(b/1024).toFixed(0)+' KB';const bytes=c=>(DB[c]||{}).bytes;
+ const shipped=INFO.budget_original?INFO.budget_original.rows.map(r=>r[0]):INFO.rsrcs;const now=INFO.rsrcs;
+ const rm=$('#rmunused').checked;const planned=all.filter(c=>used[c]||(!rm&&now.includes(c)));
+ const names=[...new Set([...shipped,...now,...planned])].sort();
+ const tot=l=>l.reduce((a,c)=>a+(bytes(c)||0),0);const S=tot(shipped),N=tot(now),P=tot(planned);
+ let rows='<tr><th>creature</th><th>WAD</th><th>shipped level</th><th>in ISO now</th><th>planned</th></tr>';
+ for(const c of names){const b=bytes(c);const cell=l=>l.includes(c)?kb(b):'<span class="mut">—</span>';rows+=`<tr><td>${c}</td><td class="mut">${(DB[c]||{}).wad||''}</td><td>${cell(shipped)}</td><td>${cell(now)}</td><td class="${planned.includes(c)&&!now.includes(c)?'ok':''}">${cell(planned)}</td></tr>`;}
+ const cls=P>S*1.15?'bad':P>S?'warn':'ok';const d=P-S;
+ rows+=`<tr><th>total</th><th></th><th>${kb(S)}</th><th>${kb(N)}</th><th class="${cls}">${kb(P)} (${d>=0?'+':''}${(d/1024).toFixed(0)} KB, ${S?((100*d/S).toFixed(0)):0}% vs shipped)</th></tr>`;
+ $('#memtable').innerHTML=rows;$('#memcard').hidden=false;
+ $('#memwad').innerHTML=`level WAD file: in ISO ${kb(INFO.size)}`+(LASTWAD?` → after plan ${kb(LASTWAD)} (from last preview)`:' → run Preview to see the planned size')+`. Pools planned: ${Object.entries(COUNTS).map(([c,n])=>c+' N='+n).join(', ')||'defaults'}.`;}
 const isScripted=e=>e.bra.some(b=>!/^BRA_Spawn/.test(b));
 function renderGates(){const gs=(INFO.gates||[]).filter(g=>g.role==='threshold'||g.role==='counter'||(g.role==='value'&&g.init!==null&&g.type!=='bool'));
  let rows='<tr><th>var</th><th>role</th><th>initial</th><th>new value</th><th>bypass</th><th>set in</th><th>compared with / incremented by</th><th>used by</th></tr>';
@@ -77,9 +94,7 @@ function renderGates(){const gs=(INFO.gates||[]).filter(g=>g.role==='threshold'|
 function render(){renderGates();$('#lvlinfo').textContent=`${INFO.size} bytes · sha256 ${INFO.sha256.slice(0,12)} · RSRCS: ${INFO.rsrcs.join(', ')}`;
  const used={};for(const enc of INFO.encounters)for(const e of enc.entities){const c=ASSIGN[enc.tag+':'+e.name]||e.crt;used[c]=(used[c]||0)+1;}
  const all=[...new Set([...INFO.rsrcs,...Object.keys(used)])];
- const bud=INFO.budget||{rows:[],total:0};let cur=0,unk=[];for(const c of all){const b=(DB[c]||{}).bytes;if(b==null)unk.push(c);else cur+=b;}
- const orig=INFO.budget_original?INFO.budget_original.total:INFO.budget.total;
- $('#budget').innerHTML=`creature WAD payload: <b class="${cur>orig*1.15?'bad':cur>orig?'warn':'ok'}">${(cur/1024).toFixed(0)} KB</b> for the creatures currently referenced vs <b>${(orig/1024).toFixed(0)} KB</b> in the shipped level${unk.length?' (unknown size: '+unk.join(', ')+')':''}. PS2 has 32 MB total; staying at or below the original is the safe zone, a TLB miss on load usually means it was exceeded.`;
+ renderMemory(all,used);
  $('#clist').innerHTML=all.map(c=>{const blk=INFO.creatures[c];const db=DB[c]||{};const n=COUNTS[c]??(blk?blk.n:(db.block?db.block.n:''));const state=INFO.rsrcs.includes(c)?(used[c]?'':'<span class="bad">no spawner left: will be REMOVED from the level</span>'):'<span class="ok">new</span>';
   return `<span class="pill">${c} ${state} N <input type="number" min="1" max="64" value="${n}" data-c="${c}"> <span class="mut">${used[c]||0} spawners${blk?'':(INFO.rsrcs.includes(c)?' · no pool':'')}${db.bra?' · '+db.bra.filter(b=>b.startsWith('BRA_Spawn')).length+' spawn behaviours':''}</span></span>`}).join('');
  $('#clist').querySelectorAll('input').forEach(i=>i.onchange=()=>{COUNTS[i.dataset.c]=+i.value});
@@ -93,8 +108,9 @@ function render(){renderGates();$('#lvlinfo').textContent=`${INFO.size} bytes ·
  $('#enctable').querySelectorAll('select[data-enc]').forEach(s=>s.onchange=()=>{if(!s.value)return;const enc=INFO.encounters.find(x=>x.tag==s.dataset.enc);let skipped=0;for(const e of enc.entities){if(isScripted(e)){skipped++;continue;}const k=enc.tag+':'+e.name;if(s.value===e.crt)delete ASSIGN[k];else ASSIGN[k]=s.value;}if(skipped)log(`${enc.script}: left ${skipped} scripted entit${skipped>1?'ies':'y'} unchanged (change them row by row if you really mean it)`);render();});
  $('#creatures').hidden=$('#encs').hidden=$('#actions').hidden=false;$('#bk').textContent=INFO.backup?'backup: '+INFO.backup:'no backup yet (one is saved on first upload)';}
 function plan(){return {assign:ASSIGN,counts:COUNTS,gates:GATES,spawns:SPAWNS,bypass:[...BYPASS],remove_unused:$('#rmunused').checked,bra_fallback:$('#fallback').value||'BRA_Spawn'};}
-async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL}`);try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));(r.log||[]).forEach(l=>log('  '+l));if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);if(path==='/api/apply'&&extra.upload||path==='/api/restore')await load(true);}catch(e){log('ERROR: '+e.message)}btns.forEach(b=>b.disabled=false);}
+async function run(path,extra,label){const btns=document.querySelectorAll('#actions button');btns.forEach(b=>b.disabled=true);log(`--- ${label} ${LEVEL}`);try{const r=await api(path,Object.assign({name:LEVEL,plan:plan()},extra||{}));(r.log||[]).forEach(l=>log('  '+l));if(r.wad_bytes){LASTWAD=r.wad_bytes;render();}if(r.uploaded!==undefined)log(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.restored!==undefined)log(r.restored?'restored original':'restore failed: '+r.response);if(path!=='/api/preview'&&path!=='/api/restore'&&r.output)log('output: '+r.output);if(path==='/api/apply'&&extra.upload||path==='/api/restore')await load(true);}catch(e){log('ERROR: '+e.message)}btns.forEach(b=>b.disabled=false);}
 $('#bypassall').onclick=()=>{for(const g of INFO.gates||[])if(g.role==='threshold')BYPASS.add(g.var);renderGates();};$('#bypassnone').onclick=()=>{BYPASS=new Set();renderGates();};
+$('#rmunused').onchange=()=>render();
 $('#scan').onclick=async()=>{await api('/api/scan',{});status();};$('#load').onclick=()=>load(false);$('#reload').onclick=()=>load(true);
 $('#preview').onclick=()=>run('/api/preview',{},'preview');$('#apply').onclick=()=>run('/api/apply',{upload:false},'write');
 $('#upload').onclick=()=>{if(confirm(`Write ${LEVEL} into the ISO? The original is backed up on first upload.`))run('/api/apply',{upload:true},'apply+upload');};
