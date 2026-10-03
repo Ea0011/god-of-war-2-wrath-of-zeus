@@ -231,11 +231,41 @@ def enemy_block(pools, enemy):
         return None, None
     k = starts[0]
     go, mem = [], []
-    while k < len(seq) and seq[k]['kind'] == 'go':
-        go.append(seq[k]); k += 1
-    while k < len(seq) and seq[k]['kind'] == 'mem':
-        mem.append(seq[k]); k += 1
+    fxbone = ghash('fxBoneData')
+    # A creature block is one or more [GO run][MEM run] pairs; the generator nests helper groups
+    # (e.g. Medusa: goStoneHero/goFreezeHero + MedusaEyeAttackData systems) and always closes the
+    # creature with its systems block, whose last entry is fxBoneData x1.
+    while k < len(seq):
+        if seq[k]['kind'] == 'go' and (go or mem):
+            if seq[k]['hash'] != target and _is_creature_start(seq[k]):
+                break
+        while k < len(seq) and seq[k]['kind'] == 'go':
+            go.append(seq[k]); k += 1
+        run = []
+        while k < len(seq) and seq[k]['kind'] == 'mem':
+            run.append(seq[k]); k += 1
+        fx = next((i for i, x in enumerate(run) if x['hash'] == fxbone), None)
+        if fx is None:
+            mem.extend(run)
+            if not run:
+                break
+            continue
+        keep = run[:fx + 1]
+        # one trailing creature-scaled entry may follow (Siren ConcussionInstanceData, Cerpup
+        # GrowCharInstanceData, Tryng tValidityDisk); passive-object blocks (hfsmReactive...) never do
+        if len(run) == fx + 2 and run[fx + 1]['name'] != 'hfsmReactive':
+            keep.append(run[fx + 1])
+        mem.extend(keep)
+        break
     return go, mem
+
+
+KNOWN_CREATURES = set()   # lower-case creature names (filled from RSRCS / index); used as block boundaries
+
+
+def _is_creature_start(p):
+    n = p['name'].lower()
+    return n.startswith('go') and n[2:] in KNOWN_CREATURES
 
 
 def scale_block(block, n_donor, n_new):
@@ -606,6 +636,7 @@ def level_info(tags):
     """Everything the UI needs about a level: RSRCS, creature blocks, encounters."""
     r = find_tag(tags, 'RSRCS')
     names = rsrcs_names(r) if r else []
+    KNOWN_CREATURES.update(n.lower() for n in names)
     dc = DC(tags)
     pools = dc.pools()
     creatures = {}
@@ -657,17 +688,23 @@ def apply_plan(tags, plan, creature_db, log=print):
                         replaces.setdefault(cur, set()).add(crt[0])
     r = find_tag(tags, 'RSRCS')
     names = rsrcs_names(r) if r else []
+    KNOWN_CREATURES.update(n.lower() for n in names)
+    KNOWN_CREATURES.update(c.lower() for c in creature_db)
     dc = DC(tags)
     dc_changed = False
     # default N for a new creature: never below the pool size of what it replaces, so every
     # spawner that could get a slot before still can (destruction sensors depend on it)
     pools0 = dc.pools()
+    sc = spawner_counts(tags)
     for c, olds in replaces.items():
         if c not in counts and (c not in names or enemy_block(pools0, c)[0] is None):
             n_old = [enemy_block(pools0, o)[0][0]['count'] for o in olds if enemy_block(pools0, o)[0]]
             blk = creature_db.get(c, {}).get('block')
+            # concurrent demand = sum of 'alive' (or spawn count, or 1) over spawners assigned to c
+            demand = sum((sc.get(k, {}).get('alive') or sc.get(k, {}).get('count') or 1)
+                         for k, v in assign.items() if v == c)
             if n_old and blk:
-                counts[c] = max(blk['n'], *n_old)
+                counts[c] = max(blk['n'], min(max(n_old), demand))
     # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
     # (e.g. Orders10 in the shipped RHOD10) once spawners are pointed at them
     added = [c for c in usage if c not in names or
@@ -731,11 +768,14 @@ def apply_plan(tags, plan, creature_db, log=print):
     log(f'{total} script strings changed; RSRCS={names}')
     nsp = apply_spawns(tags, plan.get('spawns', {}), log=log) if plan.get('spawns') else 0
     ngates = apply_gates(tags, plan.get('gates', {}), log=log) if plan.get('gates') else 0
+    nby = bypass_gates(tags, plan.get('bypass', []), log=log) if plan.get('bypass') else 0
     for rep in gate_report(tags):
+        if plan.get('bypass') and rep['var'] in {int(v, 0) if isinstance(v, str) else int(v) for v in plan['bypass']}:
+            continue
         cur = next(g['init'] for g in level_gates(tags) if g['var'] == rep['var'])
         if cur != rep['spawn_total']:
             log(f"WARNING: total gate LevelData[{rep['var']:#x}] = {cur} but its spawners will produce {rep['spawn_total']} kills (== check): set it to {rep['spawn_total']}")
-    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates, spawns_changed=nsp)
+    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates, spawns_changed=nsp, bypassed=nby)
 
 
 # ============================================================================ progression gates
@@ -941,3 +981,41 @@ def gate_report(tags, spawns_override=None):
         out.append(dict(var=g['var'], init=g['init'], counter=cnt['var'], n_sensors=len(cnt['incremented_by']),
                         spawners=[f'{ti}:{name}' for (ti, name), _ in members], spawn_total=total))
     return out
+
+
+# ============================================================================ gate bypass
+def bypass_gates(tags, vars_, log=print):
+    """Force every condition handler that compares one of `vars_` (LevelData indices) to return TRUE.
+    The handler's first bytes become `push_bool TRUE ; pop_result ; exit` (11 38 3A); the rest of
+    its bytecode is left in place but never executed. Entities that only *write* the variable
+    (initialisers, counters) are untouched."""
+    want = {int(v, 0) if isinstance(v, str) else int(v) for v in vars_}
+    n = 0
+    for ti, t in enumerate(tags):
+        if not is_entities_script(t):
+            continue
+        data = bytearray(t.data)
+        epos = 0x24
+        changed = False
+        for e in iter_entities(t.data):
+            name = entity_strings(e)[0]
+            handlers, ostart = entity_handlers(e)
+            stream = e[ostart:]
+            for hid, start in handlers:
+                ops = list(walk_ops(stream, start))
+                codes = [o[1] for o in ops]
+                hit = False
+                for k in range(len(ops) - 2):
+                    if codes[k] in GET_TYPES and codes[k + 1] in GET_TYPES and 0x2E <= codes[k + 2] <= 0x37:
+                        a, b = u16(ops[k][2], 0), u16(ops[k + 1][2], 0)
+                        if (a >> 12 == 3 and (a & 0xFFF) in want) or (b >> 12 == 3 and (b & 0xFFF) in want):
+                            hit = True
+                if hit and (ops[-1][0] - start) >= 3:
+                    off = epos + ostart + start
+                    data[off:off + 3] = b'\x11\x38\x3a'
+                    changed = True; n += 1
+                    log(f'bypass: {name} h{hid} now always TRUE')
+            epos += len(e)
+        if changed:
+            t.data = bytes(data)
+    return n

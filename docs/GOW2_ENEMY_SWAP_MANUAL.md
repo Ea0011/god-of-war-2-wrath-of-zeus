@@ -114,6 +114,17 @@ tStandardEffectSystem, hfsmBreakable, tHandleSystem, goIO, hfsmIO_Misc, tMove, f
 All counts are multiples of N except `fxBoneData` = 1. The creature's own `R_*.WAD` does not
 list this block; copy it from a donor level (the index knows donors for 98 creatures).
 
+### 3.3.1 Creature blocks can be nested
+
+The generator emits a creature as one or more `[GO run][MEM run]` pairs and closes it with the
+systems run that contains `fxBoneData x1` (trailing creature-scaled entries such as Siren's
+`ConcussionInstanceData` or Cerpup's `GrowCharInstanceData` may follow in the same run).
+Medusa is the visible case: `goMedusa00 ... goEyePower | odbEffect, hfsmHeroBreak |
+goStoneHero, goFreezeHero | hfsmBreakable ... MedusaEyeAttackData x3, hfsmEnemy1 ... fxBoneData`.
+`enemy_block()` follows this rule; before 2026-10-03 evening it stopped at the first boundary,
+which is why a ported Medusa had no beam (`MedusaEyeAttackData`) and no petrified-Kratos objects.
+Validation: all 277 creature blocks in the 122 levels end with a run containing `fxBoneData`.
+
 ### 3.4 ESC spawner scripts (`SCR_Entities`)
 Tag payload: 0x24-byte header (`04 00 01 00 "SCR_Entities"`), then entities:
 ```
@@ -230,3 +241,12 @@ equality was true only at kill 3, before the waves were done.
 Tool: `spawner_counts()`, `apply_spawns()`, `gate_report()`; UI: the "spawns / alive" column per
 spawner and the consistency line under the gates table with a one-click "set gate to N".
 Hex: the spawn count is the 4 bytes after the `01` opcode of handler 0 in the spawner entity.
+
+### 7.2 Bypassing gates
+
+`bypass_gates(tags, [vars])` (UI: "bypass" checkbox per threshold, or "Bypass all thresholds")
+overwrites the first three bytes of every condition handler that compares the variable with
+`11 38 3A` (`push_bool TRUE; pop_result; exit`). The handler then always passes, so e.g. the door
+chain fires on the first destruction event. Use it (a) to progress while testing creatures and
+(b) as a diagnostic: if the door still does not open with everything bypassed, the death sensors
+are not firing for that creature at all.
