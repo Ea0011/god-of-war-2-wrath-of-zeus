@@ -711,7 +711,7 @@ def apply_plan(tags, plan, creature_db, log=print):
     # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
     # (e.g. Orders10 in the shipped RHOD10) once spawners are pointed at them
     added = [c for c in usage if c not in names or
-             (enemy_block(pools0, c)[0] is None and creature_db.get(c, {}).get('block'))]
+             (c in replaces and enemy_block(pools0, c)[0] is None and creature_db.get(c, {}).get('block'))]
     removed = [c for c in names if c not in usage] if plan.get('remove_unused', True) else []
 
     for c in removed:
