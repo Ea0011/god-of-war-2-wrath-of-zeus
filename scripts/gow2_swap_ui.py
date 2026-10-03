@@ -163,6 +163,44 @@ def base_path(name):
     return bk if os.path.exists(bk) else fetch_wad(name)
 
 
+def plan_from_diff(base_tags, iso_tags):
+    """Reconstruct a plan that turns the shipped level into the ISO copy (assignments, pool N,
+    spawn counts, gate values, bypassed thresholds)."""
+    b, i = G.level_info(base_tags), G.level_info(iso_tags)
+    plan = dict(assign={}, counts={}, gates={}, spawns={}, bypass=[])
+    ib = {(enc['tag'], e['name']): e for enc in i['encounters'] for e in enc['entities']}
+    for enc in b['encounters']:
+        for e in enc['entities']:
+            x = ib.get((enc['tag'], e['name']))
+            if not x:
+                continue
+            k = f"{enc['tag']}:{e['name']}"
+            if x['crt'] != e['crt']:
+                plan['assign'][k] = x['crt']
+            sp = {}
+            if e['count'] is not None and x['count'] != e['count']:
+                sp['count'] = x['count']
+            if e['alive'] is not None and x['alive'] != e['alive']:
+                sp['alive'] = x['alive']
+            if sp:
+                plan['spawns'][k] = sp
+    for c, blk in i['creatures'].items():
+        if blk and (c not in b['creatures'] or not b['creatures'][c] or b['creatures'][c]['n'] != blk['n']):
+            plan['counts'][c] = blk['n']
+    bg = {g['var']: g for g in b['gates']}
+    for g in i['gates']:
+        o = bg.get(g['var'])
+        if o and o.get('init') is not None and g.get('init') != o['init']:
+            plan['gates'][str(g['var'])] = g['init']
+    # bypass: a threshold whose comparing handlers vanished in the ISO copy (overwritten with 11 38 3A)
+    for g in b['gates']:
+        if g['role'] == 'threshold' and g['compared_in']:
+            gi = next((x for x in i['gates'] if x['var'] == g['var']), None)
+            if gi is not None and not gi['compared_in']:
+                plan['bypass'].append(g['var'])
+    return plan
+
+
 def level_load(name, force=False):
     p = fetch_wad(name, force)
     iso_tags = G.read_wad(p)
@@ -176,6 +214,11 @@ def level_load(name, force=False):
                        modified=hashlib.sha256(open(p, 'rb').read()).hexdigest() != hashlib.sha256(open(base, 'rb').read()).hexdigest())
     info['budget'] = budget(iso_info['rsrcs'])
     info['budget_original'] = budget(info['rsrcs'])
+    if base != p and info['iso']['modified']:
+        try:
+            info['iso_plan'] = plan_from_diff(G.read_wad(base), iso_tags)
+        except Exception as e:
+            info['iso_plan_error'] = str(e)
     info['file'] = p; info['size'] = os.path.getsize(p)
     info['sha256'] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     bk = os.path.join(BACKUPS, name + '.orig')
