@@ -615,6 +615,7 @@ def level_info(tags):
             n=go[0]['count'], go=[[p['hash'], p['count'], p['name']] for p in go],
             mem=[[p['hash'], p['count'], p['name']] for p in mem])
     encounters = []
+    sc = spawner_counts(tags)
     for i, t in enumerate(tags):
         if is_entities_script(t):
             ents = []
@@ -624,10 +625,11 @@ def level_info(tags):
                 crt = [s[4:] for s in ss if s.startswith('CRT_')]
                 bra = [s for s in ss if s.startswith('BRA_')]
                 if crt:
-                    ents.append(dict(name=name, crt=crt[0], bra=sorted(set(bra))))
+                    c = sc.get((i, name), {})
+                    ents.append(dict(name=name, crt=crt[0], bra=sorted(set(bra)), count=c.get('count'), alive=c.get('alive')))
             if ents:
                 encounters.append(dict(tag=i, script=t.name, entities=ents))
-    return dict(rsrcs=names, creatures=creatures, encounters=encounters, gates=level_gates(tags),
+    return dict(rsrcs=names, creatures=creatures, encounters=encounters, gates=level_gates(tags), gate_report=gate_report(tags),
                 pools=[dict(idx=p['idx'], kind=p['kind'], name=p['name'], count=p['count']) for p in sorted(pools, key=lambda p: p['idx'])])
 
 
@@ -656,6 +658,7 @@ def apply_plan(tags, plan, creature_db, log=print):
     r = find_tag(tags, 'RSRCS')
     names = rsrcs_names(r) if r else []
     dc = DC(tags)
+    dc_changed = False
     # default N for a new creature: never below the pool size of what it replaces, so every
     # spawner that could get a slot before still can (destruction sensors depend on it)
     pools0 = dc.pools()
@@ -674,7 +677,7 @@ def apply_plan(tags, plan, creature_db, log=print):
     for c in removed:
         go, mem = enemy_block(dc.pools(), c)
         if go:
-            rebuild_pools(dc, go, mem, [], [])
+            rebuild_pools(dc, go, mem, [], []); dc_changed = True
             log(f'pools: removed {c} block ({len(go)} GO + {len(mem)} MEM)')
         names.remove(c)
     for c in added:
@@ -686,7 +689,7 @@ def apply_plan(tags, plan, creature_db, log=print):
         go = [dict(hash=h, count=k, name=nm) for h, k, nm in blk['go']]
         mem = [dict(hash=h, count=k, name=nm) for h, k, nm in blk['mem']]
         sgo, smem = scale_block(go, blk['n'], n), scale_block(mem, blk['n'], n)
-        rebuild_pools(dc, [], [], sgo, smem)
+        rebuild_pools(dc, [], [], sgo, smem); dc_changed = True
         if c not in names:
             names.append(c)
         log(f'pools: added {c} block ({len(sgo)} GO + {len(smem)} MEM, N={n}, donor N={blk["n"]})')
@@ -695,10 +698,11 @@ def apply_plan(tags, plan, creature_db, log=print):
             continue
         go, mem = enemy_block(dc.pools(), c)
         if go and go[0]['count'] != n:
-            rebuild_pools(dc, go, mem, scale_block(go, go[0]['count'], n), scale_block(mem, go[0]['count'], n))
+            rebuild_pools(dc, go, mem, scale_block(go, go[0]['count'], n), scale_block(mem, go[0]['count'], n)); dc_changed = True
             log(f'pools: rescaled {c} N {go[0]["count"]} -> {n}')
-    dc.store()
-    if r:
+    if dc_changed:
+        dc.store()
+    if r and names != rsrcs_names(r):
         r.data = rsrcs_build(names)
     log(f'RSRCS: {names}')
 
@@ -725,8 +729,13 @@ def apply_plan(tags, plan, creature_db, log=print):
             t.data = bytes(out); total += ch_tag
             log(f'ESC tag#{i} {t.name}: {ch_tag} string(s) renamed')
     log(f'{total} script strings changed; RSRCS={names}')
+    nsp = apply_spawns(tags, plan.get('spawns', {}), log=log) if plan.get('spawns') else 0
     ngates = apply_gates(tags, plan.get('gates', {}), log=log) if plan.get('gates') else 0
-    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates)
+    for rep in gate_report(tags):
+        cur = next(g['init'] for g in level_gates(tags) if g['var'] == rep['var'])
+        if cur != rep['spawn_total']:
+            log(f"WARNING: total gate LevelData[{rep['var']:#x}] = {cur} but its spawners will produce {rep['spawn_total']} kills (== check): set it to {rep['spawn_total']}")
+    return dict(rsrcs=names, added=added, removed=removed, strings_changed=total, gates_changed=ngates, spawns_changed=nsp)
 
 
 # ============================================================================ progression gates
@@ -804,8 +813,8 @@ def level_gates(tags):
                     if codes[k] in GET_TYPES and codes[k + 1] in GET_TYPES and 0x2E <= codes[k + 2] <= 0x37:
                         a, b = u16(ops[k][2], 0), u16(ops[k + 1][2], 0)
                         if a >> 12 == 3 and b >> 12 == 3:
-                            compares.setdefault(a & 0xFFF, set()).add((b & 0xFFF, name))
-                            compares.setdefault(b & 0xFFF, set()).add((a & 0xFFF, name))
+                            compares.setdefault(a & 0xFFF, set()).add((b & 0xFFF, name, codes[k + 2]))
+                            compares.setdefault(b & 0xFFF, set()).add((a & 0xFFF, name, codes[k + 2]))
                 for o in ops:
                     if o[1] in GET_TYPES and u16(o[2], 0) >> 12 == 3:
                         reads.setdefault(u16(o[2], 0) & 0xFFF, set()).add(name)
@@ -814,8 +823,9 @@ def level_gates(tags):
     for v in sorted(set(init) | set(incr) | set(reads)):
         d = dict(init.get(v, dict(var=v, type='?', init=None)))
         d['incremented_by'] = sorted(set(incr.get(v, [])))
-        d['compared_with'] = sorted({o for o, _ in compares.get(v, set())})
-        d['compared_in'] = sorted({n for _, n in compares.get(v, set())})
+        d['compared_with'] = sorted({o for o, _, _ in compares.get(v, set())})
+        d['compared_in'] = sorted({n for _, n, _ in compares.get(v, set())})
+        d['equality'] = any(op == 0x34 for _, _, op in compares.get(v, set()))   # 0x34 = int ==
         d['read_by'] = sorted(reads.get(v, set()))
         if d['incremented_by']:
             d['role'] = 'counter'
@@ -848,3 +858,86 @@ def apply_gates(tags, values, log=print):
         t.data = bytes(data); n += 1
         log(f"gate LevelData[{v:#x}] ({g['entity']} h{g['handler']}): {g['init']} -> {val}")
     return n
+
+
+# ============================================================================ spawn counts
+def entity_const_handlers(e):
+    """{handler id: (value, offset_in_entity_of_operand)} for handlers that are just push_int N."""
+    handlers, ostart = entity_handlers(e)
+    stream = e[ostart:]
+    out = {}
+    for hid, start in handlers:
+        ops = list(walk_ops(stream, start))
+        if len(ops) >= 2 and ops[0][1] == 0x01 and ops[1][1] == 0x38:
+            out[hid] = (struct.unpack('<i', ops[0][2])[0], ostart + ops[0][0] + 1)
+    return out
+
+
+def spawner_counts(tags):
+    """{(tag, entity name): {count, alive, offsets}} for spawner entities (push CRT_)."""
+    res = {}
+    for ti, t in enumerate(tags):
+        if not is_entities_script(t):
+            continue
+        epos = 0x24
+        for e in iter_entities(t.data):
+            name, strs, _ = entity_strings(e)
+            if any(s.startswith('CRT_') for _, s in strs):
+                ch = entity_const_handlers(e)
+                res[(ti, name)] = dict(count=ch.get(0, (None, None))[0], alive=ch.get(1, (None, None))[0],
+                                       off_count=epos + ch[0][1] if 0 in ch else None,
+                                       off_alive=epos + ch[1][1] if 1 in ch else None)
+            epos += len(e)
+    return res
+
+
+def apply_spawns(tags, spawns, log=print):
+    """spawns: {"tag:entity": {"count": n, "alive": m}} patched in place (push_int operands)."""
+    sc = spawner_counts(tags)
+    n = 0
+    for k, v in spawns.items():
+        ti, name = k.split(':', 1); ti = int(ti)
+        info = sc.get((ti, name))
+        if not info:
+            raise ValueError(f'{k}: not a spawner')
+        data = bytearray(tags[ti].data)
+        for fld, off in (('count', info['off_count']), ('alive', info['off_alive'])):
+            if fld in v and v[fld] is not None:
+                if off is None:
+                    raise ValueError(f'{k}: no {fld} handler to edit')
+                struct.pack_into('<i', data, off, int(v[fld])); n += 1
+                log(f"spawn {fld} {name}: {info[fld]} -> {v[fld]}")
+        tags[ti].data = bytes(data)
+    return n
+
+
+def gate_report(tags, spawns_override=None):
+    """For every '==' total gate: which spawners feed its counter and what the total should be."""
+    gates = level_gates(tags)
+    sc = spawner_counts(tags)
+    sensors_script = {}
+    for ti, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                sensors_script[entity_strings(e)[0]] = ti
+    out = []
+    # the level total is the counter fed by the most death sensors; '==' gates on other counters
+    # are per-wave checks (e.g. 'first kill of wave 4') and must not be forced to the spawn total
+    maxinc = max([len(x['incremented_by']) for x in gates if x['role'] == 'counter'] or [0])
+    for g in gates:
+        if g['role'] != 'threshold' or not g.get('equality'):
+            continue
+        counters = [c for c in g['compared_with'] if any(x['var'] == c and x['role'] == 'counter' and len(x['incremented_by']) == maxinc for x in gates)]
+        if not counters:
+            continue
+        cnt = next(x for x in gates if x['var'] == counters[0])
+        scripts = {sensors_script.get(s) for s in cnt['incremented_by']} - {None}
+        members = [(k, v) for k, v in sc.items() if k[0] in scripts]
+        total = 0
+        for (ti, name), v in members:
+            ov = (spawns_override or {}).get(f'{ti}:{name}', {})
+            c = ov.get('count', v['count'])
+            total += c if c is not None else 1
+        out.append(dict(var=g['var'], init=g['init'], counter=cnt['var'], n_sensors=len(cnt['incremented_by']),
+                        spawners=[f'{ti}:{name}' for (ti, name), _ in members], spawn_total=total))
+    return out

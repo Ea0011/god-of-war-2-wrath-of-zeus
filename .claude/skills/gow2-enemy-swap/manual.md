@@ -211,3 +211,22 @@ pool N without raising the total can overshoot it.
 Why a spawner that never spawns breaks a door: its `DesMess` sensors never fire, the counters
 never reach the thresholds. That is what happened when Orders10 got pool N=9 in a room that
 needs 16 slots, and when the Colossus spawner was reassigned (its scripted events never ran).
+
+### 7.1 Spawn counts and the total gate
+
+Each spawner entity (type 9) stores its own numbers as one-constant handlers: **h0 = how many
+enemies it spawns in total, h1 = how many alive at once** (starters have neither: 1 each). The
+room total is the sum of h0 over the spawners whose death sensors feed the counter:
+RHOD10 first room = 3 starters + 3+3+2+2+2+2+2+2 = **21**, which is exactly `LevelData[0x14]`.
+Every door entity checks `0xb == 0x14 && !doorOpened` and the `DesOpen` sensors additionally need
+all wave flags, so:
+
+- **total gate must equal the sum of spawn counts** (it is `==`; overshoot or undershoot locks the door);
+- **sum of wave thresholds must be <= total**, otherwise the wave flags never flip.
+
+Setting 0x14 = 3 with thresholds 3/5/5/1 left (18:06 upload) is why the door stayed shut: the
+equality was true only at kill 3, before the waves were done.
+
+Tool: `spawner_counts()`, `apply_spawns()`, `gate_report()`; UI: the "spawns / alive" column per
+spawner and the consistency line under the gates table with a one-click "set gate to N".
+Hex: the spawn count is the 4 bytes after the `01` opcode of handler 0 in the spawner entity.
