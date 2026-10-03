@@ -90,7 +90,8 @@ def scan_worker(levels_only_regex):
                     crt = [n[4:] for n in tl if n.startswith('CRT_')]
                     if crt:
                         c = idx['creatures'].setdefault(crt[0], {})
-                        c.update(wad=w, bra=[n for n in tl if n.startswith('BRA_')])
+                        c.update(wad=w, bra=[n for n in tl if n.startswith('BRA_')],
+                                 bytes=sum(t['Size'] for t in j['Tags'] if t['Tag'] != 0))
             except Exception as e:  # keep going
                 st['msg'] = f'{w}: {e}'
             st['done'] += 1
@@ -142,15 +143,25 @@ def creature_db(prefer_level=None):
             blk = donors[prefer_level]
         elif donors:
             blk = max(donors.values(), key=lambda b: b['n'])
-        db[cn] = dict(bra=c.get('bra', []), block=blk, wad=c.get('wad'), donors=sorted(donors))
+        db[cn] = dict(bra=c.get('bra', []), block=blk, wad=c.get('wad'), donors=sorted(donors), bytes=c.get('bytes'))
     return db
 
 
 # ------------------------------------------------------------------ level ops
+def budget(rsrcs, db=None):
+    db = db or creature_db()
+    rows = [(c, (db.get(c) or {}).get('bytes')) for c in rsrcs]
+    return dict(rows=rows, total=sum(b or 0 for _, b in rows), unknown=[c for c, b in rows if b is None])
+
+
 def level_load(name, force=False):
     p = fetch_wad(name, force)
     tags = G.read_wad(p)
     info = G.level_info(tags)
+    info['budget'] = budget(info['rsrcs'])
+    bk0 = os.path.join(BACKUPS, name + '.orig')
+    if os.path.exists(bk0):
+        info['budget_original'] = budget(G.level_info(G.read_wad(bk0))['rsrcs'])
     info['file'] = p; info['size'] = os.path.getsize(p)
     info['sha256'] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     bk = os.path.join(BACKUPS, name + '.orig')
@@ -163,6 +174,7 @@ def level_apply(name, plan, upload):
     p = fetch_wad(name)
     tags = G.read_wad(p)
     res = G.apply_plan(tags, plan, creature_db(), log=log.append)
+    b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}" + (f" (unknown size: {b['unknown']})" if b['unknown'] else ''))
     data = G.write_wad(tags)
     outp = os.path.join(OUT, name.replace('.WAD', '') + '.mod.WAD')
     open(outp, 'wb').write(data)
@@ -248,7 +260,8 @@ class H(BaseHTTPRequestHandler):
             elif self.path == '/api/preview':
                 tags = G.read_wad(fetch_wad(body['name'])); log = []
                 res = G.apply_plan(tags, body['plan'], creature_db(), log=log.append)
-                res['log'] = log; self._json(res)
+                b = budget(res['rsrcs']); log.append(f"creature WAD payload now {b['total']/1024:.0f} KB for {res['rsrcs']}")
+                res['log'] = log; res['budget'] = b; self._json(res)
             elif self.path == '/api/apply':
                 self._json(level_apply(body['name'], body['plan'], bool(body.get('upload'))))
             elif self.path == '/api/restore':

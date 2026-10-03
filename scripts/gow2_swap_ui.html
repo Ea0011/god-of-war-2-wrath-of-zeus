@@ -30,6 +30,7 @@ pre{background:color-mix(in srgb,var(--line) 30%,transparent);padding:10px;borde
 </div>
 <div class="card" id="creatures" hidden>
  <div class="row"><b>Creatures in this level</b><span class="mut">N = max simultaneous instances (pool size). Change a number to rescale pools.</span></div>
+ <div id="budget" class="mut" style="margin:4px 0 8px"></div>
  <div id="clist" class="row"></div>
  <div class="row" style="margin-top:8px"><label><input type="checkbox" id="rmunused" checked> remove creatures that no spawner references any more</label>
  <label>fallback behaviour <input id="fallback" value="BRA_Spawn" size="12"></label></div>
@@ -76,6 +77,9 @@ function renderGates(){const gs=(INFO.gates||[]).filter(g=>g.role==='threshold'|
 function render(){renderGates();$('#lvlinfo').textContent=`${INFO.size} bytes · sha256 ${INFO.sha256.slice(0,12)} · RSRCS: ${INFO.rsrcs.join(', ')}`;
  const used={};for(const enc of INFO.encounters)for(const e of enc.entities){const c=ASSIGN[enc.tag+':'+e.name]||e.crt;used[c]=(used[c]||0)+1;}
  const all=[...new Set([...INFO.rsrcs,...Object.keys(used)])];
+ const bud=INFO.budget||{rows:[],total:0};let cur=0,unk=[];for(const c of all){const b=(DB[c]||{}).bytes;if(b==null)unk.push(c);else cur+=b;}
+ const orig=INFO.budget_original?INFO.budget_original.total:INFO.budget.total;
+ $('#budget').innerHTML=`creature WAD payload: <b class="${cur>orig*1.15?'bad':cur>orig?'warn':'ok'}">${(cur/1024).toFixed(0)} KB</b> for the creatures currently referenced vs <b>${(orig/1024).toFixed(0)} KB</b> in the shipped level${unk.length?' (unknown size: '+unk.join(', ')+')':''}. PS2 has 32 MB total; staying at or below the original is the safe zone, a TLB miss on load usually means it was exceeded.`;
  $('#clist').innerHTML=all.map(c=>{const blk=INFO.creatures[c];const db=DB[c]||{};const n=COUNTS[c]??(blk?blk.n:(db.block?db.block.n:''));const state=INFO.rsrcs.includes(c)?(used[c]?'':'<span class="bad">no spawner left: will be REMOVED from the level</span>'):'<span class="ok">new</span>';
   return `<span class="pill">${c} ${state} N <input type="number" min="1" max="64" value="${n}" data-c="${c}"> <span class="mut">${used[c]||0} spawners${blk?'':(INFO.rsrcs.includes(c)?' · no pool':'')}${db.bra?' · '+db.bra.filter(b=>b.startsWith('BRA_Spawn')).length+' spawn behaviours':''}</span></span>`}).join('');
  $('#clist').querySelectorAll('input').forEach(i=>i.onchange=()=>{COUNTS[i.dataset.c]=+i.value});
