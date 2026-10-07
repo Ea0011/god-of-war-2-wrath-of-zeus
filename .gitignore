@@ -10,6 +10,7 @@
 !/scripts/gow2_swap_ui.html
 !/scripts/start_swap_ui.sh
 !/scripts/stop_swap_ui.sh
+!/scripts/gow2_report.py
 !/scripts/setup.sh
 !/.claude/
 /.claude/*
