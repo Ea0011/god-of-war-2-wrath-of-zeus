@@ -124,12 +124,45 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
              '<span><i class="sw" style="background:var(--gate)"></i>progression gate</span></div>'
              '<p class="mut" style="max-width:900px">How to read a row: <b>count</b> is how many enemies the spawner produces over the encounter, <b>alive</b> how many at once; starters without numbers spawn one. '
              '<b>Pool N</b> in the level header is how many of that creature can exist simultaneously anywhere in the level. The memory figures are advisory: the creature WAD payload the level streams; staying near the shipped total is a good first guess, not a proven limit.</p></header>')
-    # TOC
-    H.append('<div class="wrap"><h3>Levels</h3><div class="toc">' + ''.join(f'<div><a href="#L{esc(L["code"])}">{esc(L["code"])}</a> <span class="mut">{", ".join(esc(c) for c in L["info"]["rsrcs"]) or "no creatures"}</span></div>' for L in levels) + '</div></div>')
+    # ---- table of contents, grouped by game area
+    FAMILY_NAMES = {'RHOD': 'Rhodes', 'PEGA': 'Typhon / Pegasus flight', 'ISLE': 'Island of Creation', 'BOG': 'Bog of the Forgotten',
+                    'ATLAS': 'Atlas', 'PAL': 'Palace of the Fates', 'SPIR': 'Sisters of Fate / the Loom', 'ZEUS': 'Zeus',
+                    'CMBT': 'Challenge of the Titans', 'FREE': 'Bonus / free-play arenas'}
+    H.append('<section class="wrap" style="padding-top:18px"><h2>Contents</h2><div class="mut">one line per level: enemies spawned in total, creatures with their counts, number of kill gates, number of scripted spawners. Family names are the usual fan names for the file prefixes; level codes are the game\'s own.</div>')
+    fam_of = lambda code: re.match(r'[A-Z]+', code).group(0)
+    cur = None
+    for L in levels:
+        f = fam_of(L['code'])
+        if f != cur:
+            if cur is not None:
+                H.append('</table>')
+            cur = f
+            H.append(f'<h3 style="margin-top:16px">{esc(f)} — {esc(FAMILY_NAMES.get(f, ""))}</h3><table><tr><th>level</th><th>enemies</th><th>creatures (spawned count)</th><th>kill gates</th><th>scripted</th></tr>')
+        info = L['info']
+        combat = [(c, n) for c, n in sorted(L['totals'].items(), key=lambda x: -x[1]) if cinfo.get(c, ('?', {}))[0] == 'combat']
+        other = [(c, n) for c, n in L['totals'].items() if cinfo.get(c, ('?', {}))[0] != 'combat']
+        nscr = sum(1 for enc in info['encounters'] for e in enc['entities'] if any(not b.startswith('BRA_Spawn') for b in e['bra']))
+        ngates = sum(1 for g in L['gates'] if g['role'] == 'threshold')
+        cl = ', '.join(f'{esc(c)} ×{n}' for c, n in combat) + (' <span class="mut">· ' + ', '.join(f'{esc(c)} ×{n}' for c, n in other) + '</span>' if other else '')
+        H.append(f'<tr><td><a href="#L{esc(L["code"])}"><b>{esc(L["code"])}</b></a></td><td>{sum(n for _, n in combat)}</td><td>{cl or "<span class=mut>none</span>"}</td><td>{ngates or ""}</td><td>{nscr or ""}</td></tr>')
+    if cur is not None:
+        H.append('</table>')
+    H.append('</section>')
+    # ---- where is what: creature -> levels
+    H.append('<section class="level wrap"><h2>Where is what</h2><div class="mut">every creature and the shipped levels it spawns in, with how many it spawns there; use this to find a donor level for a creature you want elsewhere</div><table><tr><th>creature</th><th>kind</th><th>total</th><th>levels (count)</th></tr>')
+    where = {}
+    for L in levels:
+        for c, n in L['totals'].items():
+            where.setdefault(c, []).append((L['code'], n))
+    for c in sorted(where, key=str.lower):
+        kind = cinfo.get(c, ('?', {}))[0]
+        lv = sorted(where[c], key=lambda x: level_sort_key(x[0]))
+        H.append(f'<tr class="{"other" if kind != "combat" else ""}"><td><b>{esc(c)}</b></td><td>{kind}</td><td>{sum(n for _, n in lv)}</td><td>' + ', '.join(f'<a href="#L{esc(l)}">{esc(l)}</a> ×{n}' for l, n in lv) + '</td></tr>')
+    H.append('</table></section>')
     for L in levels:
         info, code = L['info'], L['code']
         shipped_kb = sum(sizes.get(c, 0) for c in info['rsrcs']) // 1024
-        H.append(f'<section class="level wrap" id="L{esc(code)}"><div class="hdr"><div><h2>{esc(code)}</h2>')
+        H.append(f'<section class="level wrap" id="L{esc(code)}"><div class="hdr"><div><h2>{esc(code)} <span class="mut" style="font-weight:400;font-size:14px">{esc(FAMILY_NAMES.get(fam_of(code), ""))}</span></h2>')
         H.append('<table><tr><th>creature</th><th>kind</th><th>spawned in level</th><th>pool N (at once)</th><th>WAD</th><th>size</th><th>proposed pool N</th></tr>')
         for c in info['rsrcs']:
             blk = info['creatures'].get(c); kind = cinfo.get(c, ('?', {}))[0]
