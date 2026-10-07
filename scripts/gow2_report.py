@@ -55,9 +55,17 @@ def entity_graph(tags):
 
 def classify(creature, idx):
     c = idx['creatures'].get(creature) or next((v for k, v in idx['creatures'].items() if k.lower() == creature.lower()), {})
-    blocks = (c.get('donors') or {}).values()
-    combat = any(any(n == 'hfsmEnemy1' for h, k, n in b['mem']) for b in blocks)
-    return ('combat' if combat else 'other'), c
+    blocks = list((c.get('donors') or {}).values())
+    mem = {n for b in blocks for h, k, n in b['mem']}
+    if creature.lower() == 'pegasus':
+        kind = 'other'                                   # the mount
+    elif mem & {'hfsmEnemy1', 'hfsmPegasusEnemy'}:
+        kind = 'combat'                                  # ground or flight enemy AI
+    elif ('tFightSystem' in mem) or (not blocks and (c.get('bytes') or 0) > 1_500_000):
+        kind = 'boss'                                    # reactive set-piece fighter (Colossus stages, Kraken, Barbarian King)
+    else:
+        kind = 'other'                                   # bodies, civilians, props, hands
+    return kind, c
 
 
 def build_level(code, idx, img_dir):
@@ -120,7 +128,7 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
     H.append('<div class="toolbar noprint"><b>Proposal form</b><span class="mut">pick a replacement creature or "remove", change counts, then</span><button onclick="exportPlan()">Export proposals (JSON)</button><button onclick="clearPlan()">Clear</button><button onclick="window.print()">Print / PDF</button></div>')
     H.append(f'<header class="top"><h1>{esc(title)}</h1><div class="mut">God of War II (PS2) · every spawner in every level, what it spawns and how many · generated from the game files by scripts/gow2_report.py</div>'
              '<div class="legend" style="margin-top:10px"><span><i class="sw" style="background:var(--yl)"></i>scripted entity (cutscene / set piece: change with care)</span>'
-             '<span><i class="sw" style="background:var(--other)"></i>non-combat spawner (bodies, civilians, props)</span>'
+             '<span><i class="sw" style="background:var(--other)"></i>non-combat spawner (bodies, civilians, props, the mount)</span><span><b>boss</b> = reactive set-piece fighter (Colossus stages, Kraken, Barbarian King)</span>'
              '<span><i class="sw" style="background:var(--gate)"></i>progression gate</span></div>'
              '<p class="mut" style="max-width:900px">How to read a row: <b>count</b> is how many enemies the spawner produces over the encounter, <b>alive</b> how many at once; starters without numbers spawn one. '
              '<b>Pool N</b> in the level header is how many of that creature can exist simultaneously anywhere in the level. The memory figures are advisory: the creature WAD payload the level streams; staying near the shipped total is a good first guess, not a proven limit.</p></header>')
@@ -139,8 +147,8 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
             cur = f
             H.append(f'<h3 style="margin-top:16px">{esc(f)} — {esc(FAMILY_NAMES.get(f, ""))}</h3><table><tr><th>level</th><th>enemies</th><th>creatures (spawned count)</th><th>kill gates</th><th>scripted</th></tr>')
         info = L['info']
-        combat = [(c, n) for c, n in sorted(L['totals'].items(), key=lambda x: -x[1]) if cinfo.get(c, ('?', {}))[0] == 'combat']
-        other = [(c, n) for c, n in L['totals'].items() if cinfo.get(c, ('?', {}))[0] != 'combat']
+        combat = [(c, n) for c, n in sorted(L['totals'].items(), key=lambda x: -x[1]) if cinfo.get(c, ('?', {}))[0] in ('combat', 'boss')]
+        other = [(c, n) for c, n in L['totals'].items() if cinfo.get(c, ('?', {}))[0] not in ('combat', 'boss')]
         nscr = sum(1 for enc in info['encounters'] for e in enc['entities'] if any(not b.startswith('BRA_Spawn') for b in e['bra']))
         ngates = sum(1 for g in L['gates'] if g['role'] == 'threshold')
         cl = ', '.join(f'{esc(c)} ×{n}' for c, n in combat) + (' <span class="mut">· ' + ', '.join(f'{esc(c)} ×{n}' for c, n in other) + '</span>' if other else '')
@@ -157,7 +165,7 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
     for c in sorted(where, key=str.lower):
         kind = cinfo.get(c, ('?', {}))[0]
         lv = sorted(where[c], key=lambda x: level_sort_key(x[0]))
-        H.append(f'<tr class="{"other" if kind != "combat" else ""}"><td><b>{esc(c)}</b></td><td>{kind}</td><td>{sum(n for _, n in lv)}</td><td>' + ', '.join(f'<a href="#L{esc(l)}">{esc(l)}</a> ×{n}' for l, n in lv) + '</td></tr>')
+        H.append(f'<tr class="{"other" if kind not in ("combat", "boss") else ""}"><td><b>{esc(c)}</b></td><td>{kind}</td><td>{sum(n for _, n in lv)}</td><td>' + ', '.join(f'<a href="#L{esc(l)}">{esc(l)}</a> ×{n}' for l, n in lv) + '</td></tr>')
     H.append('</table></section>')
     for L in levels:
         info, code = L['info'], L['code']
