@@ -64,6 +64,19 @@ or the ISO is tracked.
 See the script’s help (`python scripts/gow2_enemy_swap.py --help`) for full
 options.
 
+## Reports
+
+Generate a shareable per-level spawner reference (HTML + PDF) for reviewers who don't touch code:
+
+```bash
+python scripts/gow2_report.py                 # -> report/gow2_enemy_layout.{html,pdf}
+```
+
+It lists every level's creatures, pool sizes, progression gates and encounter spawners, with a
+proposal form that exports a plan `gow2_enemy_swap.py` can apply directly. Optional creature
+pictures come from `scripts/gow2_render.py` (needs Playwright + Chromium and the browser running);
+see `docs/GOW2_ENEMY_SWAP_MANUAL.md` section 11 for both.
+
 ## Testing
 
 The repository ships with a GitHub Actions workflow that runs the

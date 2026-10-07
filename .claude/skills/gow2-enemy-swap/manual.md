@@ -375,3 +375,65 @@ Entity layout and the string rule are in 3.4. Practical cases:
 4. The creature WAD itself (`R_<NAME>.WAD`) needs no edits; its `CRT_*` and `BRA_*` templates are
    listed in its 3rd `DC_WAD` tag (0x0d) if you need to check a behaviour exists.
 5. Stay within the memory budget (section 8): compare `R_*.WAD` sizes in `DONORS.md`.
+
+## 11. Shareable report (spawner reference + proposal form)
+
+`scripts/gow2_report.py` builds a single self-contained HTML (+ PDF via headless Chrome) covering
+every level's spawners, creature totals, progression gates and a proposal form, for sharing with
+someone who knows the game but not the tooling. It regenerates from the cached level WADs and
+`cache/index.json`, so re-run it any time instead of hand-editing the output.
+
+```bash
+python3 scripts/gow2_report.py                      # -> report/gow2_enemy_layout.{html,pdf}
+python3 scripts/gow2_report.py --levels RHOD10 RHOD20 --no-pdf   # fast iteration on a subset
+```
+
+Sections: a table of contents grouped by game area (RHOD=Rhodes, PEGA=Typhon/Pegasus flight,
+ISLE=Island of Creation, BOG=Bog of the Forgotten, ATLAS, PAL=Palace of the Fates, SPIR=Sisters of
+Fate, ZEUS, CMBT=Challenge of the Titans, FREE=bonus arenas) with one summary line per level; a
+"where is what" creature-to-levels cross-reference (also a donor finder); one page per level with
+its creature roster, pool sizes, memory budget, progression gates in plain language, and every
+encounter script's spawners (creature, count, alive, entrance behaviour, what triggers it); and a
+bestiary of every creature with a picture, WAD size, entrance styles and levels used.
+
+Color coding: scripted entities (cutscene/set-piece spawners whose `BRA_` behaviour is not plain
+`BRA_Spawn`) are tinted yellow; non-combat spawners (bodies, civilians, props, the Pegasus mount)
+are greyed; reactive set-piece fighters (Colossus stages, Kraken, Barbarian King) are labelled
+`boss`; progression gates get a blue callout box.
+
+The proposal form (creature dropdown, remove option, spawn/alive counts, pool N on every row) is
+live in the HTML: "Export proposals" downloads JSON keyed by level file name in exactly the shape
+`gow2_swap_ui.py`'s `/api/apply` and `gow2_enemy_swap.py`'s `apply_plan()` expect, so a reviewer's
+markup becomes a runnable plan with no transcription. In the PDF the same cells print as blank
+boxes for handwritten notes.
+
+### 11.1 Creature pictures (`scripts/gow2_render.py`)
+
+Headlessly drives god_of_war_browser's own WebGL viewer (Playwright + Chromium) to screenshot each
+creature's in-game model and drop it at `report/renders/creatures/<Creature>.png`, which
+`gow2_report.py` picks up automatically (missing images are hidden gracefully via `onerror`, so the
+report works with zero, some, or all pictures present).
+
+```bash
+scripts/start_swap_ui.sh &                                    # needs the browser on :8000
+cache/venv/bin/pip install playwright && cache/venv/bin/playwright install chromium   # once
+cache/venv/bin/python scripts/gow2_render.py                  # all creatures, skips existing files
+cache/venv/bin/python scripts/gow2_render.py --only Medusa00 Satyr10 --force
+```
+
+Mechanics: for each creature it opens `#/<R_*.WAD>/<tag>` where `<tag>` is the unnamed object node
+right after `go<Creature>` (server type `0x00010001`: skeleton + model assembled, not the bare
+`MDL_*` header) — the fallback is the first `MDL_*` tag if no such node exists. It patches
+`Renderer.js` in flight (via Playwright route interception) to record each mesh's vertex extents
+and to drop the axis-pivot helper, switches off the skeleton/collision/light debug overlays, then
+searches camera distance in two axis-aligned views until the model fills the frame without
+touching an edge, so no manual per-creature tuning is needed. Renders are approximate by design
+(a fixed 3/4 angle, default pose, no custom lighting) — good enough to tell creatures apart, not a
+cinematic shot. ~90/106 creatures render; failures are mostly disembodied prop meshes (severed
+hands, a duplicate hero skin, a couple of corpses) with degenerate or invisible geometry, and a
+handful of creatures have no `R_*.WAD` at all (`Perseus`, `Zeus`, `Sister01`, ...). Missing
+pictures just leave an empty bestiary card.
+
+Level screenshots (`report/renders/levels/<LEVEL>.png`) are not implemented; the same technique
+would apply to a level's root scene node, but levels are large enough that a single screenshot is
+unlikely to read as "where am I" without picking a specific camera per level by hand.

@@ -155,6 +155,7 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
         H.append(f'<tr><td><a href="#L{esc(L["code"])}"><b>{esc(L["code"])}</b></a></td><td>{sum(n for _, n in combat)}</td><td>{cl or "<span class=mut>none</span>"}</td><td>{ngates or ""}</td><td>{nscr or ""}</td></tr>')
     if cur is not None:
         H.append('</table>')
+    H.append('<p><a href="#Bestiary">Jump to the Bestiary</a> (every creature, pictures, entrances, levels used)</p>')
     H.append('</section>')
     # ---- where is what: creature -> levels
     H.append('<section class="level wrap"><h2>Where is what</h2><div class="mut">every creature and the shipped levels it spawns in, with how many it spawns there; use this to find a donor level for a creature you want elsewhere</div><table><tr><th>creature</th><th>kind</th><th>total</th><th>levels (count)</th></tr>')
@@ -207,7 +208,7 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
                          f'<td class="prop"><input type="number" min="0" max="64" placeholder="{e["count"] if e["count"] is not None else 1}" data-k="{esc(k)}" data-f="count" data-orig="{e["count"] if e["count"] is not None else 1}" onchange="onSpawn(this)"> / <input type="number" min="0" max="64" placeholder="{e["alive"] if e["alive"] is not None else ""}" data-k="{esc(k)}" data-f="alive" data-orig="{e["alive"] if e["alive"] is not None else 0}" onchange="onSpawn(this)"></td></tr>')
         H.append('</table></section>')
     # bestiary
-    H.append('<section class="level wrap"><h2>Bestiary</h2><div class="mut">every creature the game can stream into a level; "used in" lists the shipped levels</div><div class="best">')
+    H.append('<section class="level wrap" id="Bestiary"><h2>Bestiary</h2><div class="mut">every creature the game can stream into a level; "used in" lists the shipped levels</div><div class="best">')
     for c in sorted(idx['creatures'], key=str.lower):
         ci = idx['creatures'][c]; kind = classify(c, idx)[0]
         used = sorted(l[:-4] for l, v in idx['levels'].items() if c in v['rsrcs'])
