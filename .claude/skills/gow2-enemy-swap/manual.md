@@ -470,7 +470,7 @@ added from LEVEL / missing) and a creature picker, and warns about orphans (summ
 level whose summoner was removed, still loading its creature) with a one-click remove. Summoned
 creatures count in the memory card. The report shows the same badges.
 
-Confirmed in game (2026-10-08): a Priest ported into a level without the entity summoned once the
-entity was injected this way. Still open: whether the summoned creature appears at the summon
-entity's position or at the summoner, and what handlers 5 and 16 on the copied entity mean (they are
-kept from the donor and did not prevent the summon).
+Confirmed in game (2026-10-08) on RHOD20: soldiers replaced by Priest10, `Priest10SpawnEnemy1`
+injected (uid 89, EntityCount 89 -> 90) and retargeted to Mintar41. The Priest cast its summon and
+the Minotaur appeared where the Priest cast it, not at the entity's borrowed position, so the summon
+entity's world matrix is irrelevant. Handlers 5 and 16 copied from the donor did not prevent it.
