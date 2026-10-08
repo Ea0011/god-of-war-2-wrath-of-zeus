@@ -21,6 +21,7 @@ Usage:
   gow2_enemy_swap.py selftest LEVEL.WAD...      (round-trip the WAD writer and DC serializers)
 """
 import argparse
+import re
 import struct
 import sys
 
@@ -670,6 +671,29 @@ def apply_plan(tags, plan, creature_db, log=print):
        creature_db = {Creature: {bra: [...], block: {n, go: [[h,c,name]], mem: [[h,c,name]]} or None}}"""
     assign = {tuple(k.split(':', 1)) if isinstance(k, str) else k: v for k, v in plan.get('assign', {}).items()}
     assign = {(int(a), b): v for (a, b), v in assign.items()}
+    # --- summoners: make sure every summoner that will be in the level has its summon entities
+    summons_plan = dict(plan.get('summons', {}))
+    level_crts = set()
+    for i0, t0 in enumerate(tags):
+        if is_entities_script(t0):
+            for e0 in iter_entities(t0.data):
+                nm0, st0, _ = entity_strings(e0)
+                cr0 = [x[4:] for _, x in st0 if x.startswith('CRT_')]
+                if cr0:
+                    level_crts.add(assign.get((i0, nm0), cr0[0]))
+    for summoner in sorted(level_crts):
+        for ent in (creature_db.get(summoner) or {}).get('summons', []):
+            if find_entity(tags, ent):
+                continue
+            tpl = ((creature_db.get(summoner) or {}).get('summon_templates') or {}).get(ent)
+            if not tpl:
+                log(f'WARNING: {summoner} calls {ent} but no donor template is known; its summon will not work')
+                continue
+            inject_entity(tags, bytes.fromhex(tpl['entity']), crt=summons_plan.get(ent), log=log)
+    for ent, crt in summons_plan.items():          # retarget existing summon entities
+        hit = find_entity(tags, ent)
+        if hit:
+            assign[(hit[0], ent)] = crt
     removed_keys = set(plan.get('remove', []))
     removed_set = {(int(k.split(':', 1)[0]), k.split(':', 1)[1]) for k in removed_keys}
     assign = {k: v for k, v in assign.items() if k not in removed_set}
@@ -1093,3 +1117,59 @@ def disable_spawners(tags, keys, log=print):
             out += e
         t.data = bytes(out)
     return n
+
+
+# ============================================================================ summoners
+def summon_targets_from_dc(blob, fields):
+    """Entity names a creature's tActionSpawn nodes call (creature WAD DC data)."""
+    out = []
+    for i, (off, name, ty) in enumerate(fields):
+        if name.startswith('tActionSpawn'):
+            end = fields[i + 1][0] if i + 1 < len(fields) else len(blob)
+            for m in re.finditer(rb'[A-Za-z_][A-Za-z0-9_]{5,}', blob[off:end]):
+                s = m.group().decode('latin1')
+                if s not in out:
+                    out.append(s)
+    return out
+
+
+def find_entity(tags, name):
+    """(tag index, entity bytes) of the entity with this name, or None."""
+    for ti, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                if entity_strings(e)[0] == name:
+                    return ti, e
+    return None
+
+
+def inject_entity(tags, entity, crt=None, log=print):
+    """Append a copied entity record to the level. It gets a fresh uid (= EntityCount), the
+    level's EntityCount grows by one, its position is taken from an existing spawner of the
+    host script, and optionally its CRT_ string is repointed. Returns (tag index, name)."""
+    ec = next(t for t in tags if t.tag == 0)
+    name = entity_strings(entity)[0]
+    host = None
+    for ti, t in enumerate(tags):            # host: first script that has a creature spawner
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                if any(s.startswith('CRT_') for _, s in entity_strings(e)[1]):
+                    host = (ti, e); break
+        if host:
+            break
+    if host is None:
+        host = next((ti, next(iter_entities(t.data))) for ti, t in enumerate(tags) if is_entities_script(t))
+    ti, ref = host
+    ne = bytearray(entity)
+    ne[0:0x40] = ref[0:0x40]                 # world matrix of an existing spawner: a valid in-level spot
+    uid = ec.size
+    struct.pack_into('<H', ne, 0x48, uid)
+    ne = bytes(ne)
+    if crt:
+        old = [s for _, s in entity_strings(ne)[1] if s.startswith('CRT_')]
+        if old and old[0] != 'CRT_' + crt:
+            ne, _ = patch_entity(ne, {old[0]: 'CRT_' + crt})
+    tags[ti].data = tags[ti].data + ne
+    ec.size = uid + 1
+    log(f'summon entity {name} added to {tags[ti].name} as uid {uid}' + (f', spawns {crt}' if crt else '') + f'; EntityCount {uid} -> {uid + 1}')
+    return ti, name

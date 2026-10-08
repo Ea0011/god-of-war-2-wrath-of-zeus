@@ -110,6 +110,8 @@ def scan_worker(levels_only_regex):
             except Exception as e:
                 st['msg'] = f'{w}: {e}'
             st['done'] += 1
+        st['msg'] = 'summoners'
+        scan_summons(idx, log=lambda m: None)
         idx['built'] = time.strftime('%Y-%m-%d %H:%M:%S')
         with LOCK:
             STATE['index'] = idx
@@ -119,6 +121,49 @@ def scan_worker(levels_only_regex):
         st['error'] = str(e)
     finally:
         st['running'] = False
+
+
+def shipped_level_path(name):
+    bk = os.path.join(BACKUPS, name + '.orig')
+    return bk if os.path.exists(bk) else fetch_wad(name)
+
+
+def scan_summons(idx, log=print):
+    """Record which creatures summon by calling a level entity, and a template of each such
+    entity copied from an unmodified shipped level (prefer a level that ships the summoner)."""
+    summoners = {}
+    for c, v in idx['creatures'].items():
+        w = v.get('wad')
+        if not w:
+            continue
+        j = wad_json(w)
+        tg = {t['Tag']: t['Id'] for t in j['Tags'] if t['Name'].startswith('DC_') and 0x0b <= t['Tag'] <= 0x10}
+        if 0x0c not in tg:
+            continue
+        blob = bget(f'/dump/pack/{w}/{tg[0x0c]}'); f10 = bget(f'/dump/pack/{w}/{tg[0x10]}')
+        names = G.summon_targets_from_dc(blob, G.fields_named(f10))
+        v['summons'] = names
+        if names:
+            summoners[c] = names
+    for c, names in summoners.items():
+        tpls = {}
+        order = sorted(idx['levels'], key=lambda l: (c not in idx['levels'][l]['rsrcs'], l))
+        for ent in names:
+            for lvl in order:
+                try:
+                    tags = G.read_wad(shipped_level_path(lvl))
+                except Exception:
+                    continue
+                hit = G.find_entity(tags, ent)
+                if hit:
+                    e = hit[1]
+                    crt = [x[4:] for _, x in G.entity_strings(e)[1] if x.startswith('CRT_')]
+                    tpls[ent] = dict(level=lvl, entity=e.hex(), crt=crt[0] if crt else None,
+                                     bra=[x for _, x in G.entity_strings(e)[1] if x.startswith('BRA_')])
+                    break
+        idx['creatures'][c]['summon_templates'] = tpls
+        log(f'{c}: summons via {names}; templates from ' + ', '.join(f"{k}<-{v['level']} ({v['crt']})" for k, v in tpls.items()))
+    return summoners
 
 
 def creature_db(prefer_level=None):
@@ -145,7 +190,8 @@ def creature_db(prefer_level=None):
             blk = shipped[prefer_level]
         elif shipped:
             blk = max(shipped.values(), key=lambda b: b['n'])
-        db[cn] = dict(bra=c.get('bra', []), block=blk, wad=c.get('wad'), donors=sorted(donors), bytes=c.get('bytes'))
+        db[cn] = dict(bra=c.get('bra', []), block=blk, wad=c.get('wad'), donors=sorted(donors), bytes=c.get('bytes'),
+                      summons=c.get('summons', []), summon_templates=c.get('summon_templates', {}))
     return db
 
 
@@ -164,6 +210,7 @@ def level_load(name, force=False):
     bk0 = os.path.join(BACKUPS, name + '.orig')
     if os.path.exists(bk0):
         info['budget_original'] = budget(G.level_info(G.read_wad(bk0))['rsrcs'])
+    info['entity_names'] = sorted({G.entity_strings(e)[0] for t in tags if G.is_entities_script(t) for e in G.iter_entities(t.data)})
     info['file'] = p; info['size'] = os.path.getsize(p)
     info['sha256'] = hashlib.sha256(open(p, 'rb').read()).hexdigest()
     bk = os.path.join(BACKUPS, name + '.orig')

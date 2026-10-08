@@ -88,6 +88,10 @@ def esc(s):
 
 
 def render(levels, idx, out_html, img_dir, title):
+    summoned_by = {}
+    for c, v in idx['creatures'].items():
+        for ent in v.get('summons', []) or []:
+            summoned_by.setdefault(ent, []).append(c)
     creatures_all = sorted({c for L in levels for c in L['info']['rsrcs']} | {e['crt'] for L in levels for enc in L['info']['encounters'] for e in enc['entities']})
     cinfo = {c: classify(c, idx) for c in creatures_all}
     sizes = {c: (cinfo[c][1].get('bytes') or 0) for c in creatures_all}
@@ -175,7 +179,8 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
         H.append('<table><tr><th>creature</th><th>kind</th><th>spawned in level</th><th>pool N (at once)</th><th>WAD</th><th>size</th><th>proposed pool N</th></tr>')
         for c in info['rsrcs']:
             blk = info['creatures'].get(c); kind = cinfo.get(c, ('?', {}))[0]
-            H.append(f'<tr class="{"other" if kind=="other" else ""}"><td><b>{esc(c)}</b></td><td>{kind}</td><td>{L["totals"].get(c, 0)}</td><td>{blk["n"] if blk else "<span class=mut>none</span>"}</td><td class="mut">{esc(cinfo[c][1].get("wad",""))}</td><td>{sizes.get(c,0)//1024} KB</td>'
+            summ = (idx['creatures'].get(c) or {}).get('summons') or []
+            H.append(f'<tr class="{"other" if kind=="other" else ""}"><td><b>{esc(c)}</b>{" <span class=pill>summoner</span>" if summ else ""}</td><td>{kind}</td><td>{L["totals"].get(c, 0)}</td><td>{blk["n"] if blk else "<span class=mut>none</span>"}</td><td class="mut">{esc(cinfo[c][1].get("wad",""))}</td><td>{sizes.get(c,0)//1024} KB</td>'
                      f'<td class="prop"><input type="number" min="1" max="64" placeholder="{blk["n"] if blk else ""}" data-l="{esc(code)}" data-c="{esc(c)}" data-orig="{blk["n"] if blk else 0}" onchange="onCount(this)"></td></tr>')
         H.append(f'<tr><th colspan="2">total</th><th>{sum(L["totals"].values())}</th><th></th><th></th><th>{shipped_kb} KB <span class="mut" style="font-weight:400">(advisory)</span></th><th></th></tr></table>')
         # gates
@@ -203,7 +208,9 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
                 bra = ', '.join(BRA_WORDS.get(b, b.replace('BRA_', '')) for b in e['bra']) or '—'
                 trig = ', '.join(f'{esc(r)} <span class="mut">({TYPE_NAMES.get(next((t for n,(nm,t) in L["uid"].items() if nm==r), -1), "")})</span>' for r in L['refby'].get(e['name'], [])[:3]) or '<span class="mut">on level script</span>'
                 k = f'{code}|{enc["tag"]}:{e["name"]}'
-                H.append(f'<tr class="{cls}"><td></td><td>{esc(e["name"])}{" <span class=pill>scripted</span>" if scripted else ""}</td><td><b>{esc(e["crt"])}</b></td><td>{e["count"] if e["count"] is not None else "1"}</td><td>{e["alive"] if e["alive"] is not None else "—"}</td><td>{esc(bra)}</td><td>{trig}</td>'
+                sb = summoned_by.get(e['name'])
+                sbtag = f' <span class=pill title="triggered by the summoner, not by the level">summoned by {esc(", ".join(sb))}</span>' if sb else ''
+                H.append(f'<tr class="{cls}"><td></td><td>{esc(e["name"])}{" <span class=pill>scripted</span>" if scripted else ""}{sbtag}</td><td><b>{esc(e["crt"])}</b></td><td>{e["count"] if e["count"] is not None else "1"}</td><td>{e["alive"] if e["alive"] is not None else "—"}</td><td>{esc(bra)}</td><td>{trig}</td>'
                          f'<td class="prop"><input list="creatures" placeholder="keep" data-k="{esc(k)}" data-orig="{esc(e["crt"])}" onchange="onAssign(this)" style="width:130px"></td>'
                          f'<td class="prop"><input type="number" min="0" max="64" placeholder="{e["count"] if e["count"] is not None else 1}" data-k="{esc(k)}" data-f="count" data-orig="{e["count"] if e["count"] is not None else 1}" onchange="onSpawn(this)"> / <input type="number" min="0" max="64" placeholder="{e["alive"] if e["alive"] is not None else ""}" data-k="{esc(k)}" data-f="alive" data-orig="{e["alive"] if e["alive"] is not None else 0}" onchange="onSpawn(this)"></td></tr>')
         H.append('</table></section>')
@@ -214,7 +221,7 @@ function clearPlan(){for(const k in PLAN)delete PLAN[k];document.querySelectorAl
         used = sorted(l[:-4] for l, v in idx['levels'].items() if c in v['rsrcs'])
         bras = sorted(set(BRA_WORDS.get(b, b.replace('BRA_', '')) for b in ci.get('bra', []) if b.startswith('BRA_Spawn')))
         img = os.path.relpath(os.path.join(img_dir, 'creatures', c + '.png'), os.path.dirname(out_html))
-        H.append(f'<div class="card"><img src="{esc(img)}" alt="" onerror="this.style.display=\'none\'"><b>{esc(c)}</b> <span class="mut">{kind}</span><br><span class="mut">{esc(ci.get("wad",""))} · {(ci.get("bytes") or 0)//1024} KB</span><br>entrances: {esc(", ".join(bras) or "drops in")}<br><span class="mut">used in: {esc(", ".join(used) or "—")}</span></div>')
+        H.append(f'<div class="card"><img src="{esc(img)}" alt="" onerror="this.style.display=\'none\'"><b>{esc(c)}</b> <span class="mut">{kind}</span><br><span class="mut">{esc(ci.get("wad",""))} · {(ci.get("bytes") or 0)//1024} KB</span><br>entrances: {esc(", ".join(bras) or "drops in")}<br>{("<b>summoner</b>: calls level entity " + esc(", ".join(ci.get("summons"))) + " (the level decides what appears)<br>") if ci.get("summons") else ""}<span class="mut">used in: {esc(", ".join(used) or "—")}</span></div>')
     H.append('</div></section>')
     H.append(f'<datalist id="creatures">{all_opts}</datalist><script>{js}</script></body></html>')
     open(out_html, 'w').write('\n'.join(H))
