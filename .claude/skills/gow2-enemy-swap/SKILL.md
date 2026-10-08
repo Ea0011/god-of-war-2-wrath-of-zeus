@@ -35,3 +35,7 @@ Quick facts an agent needs before touching anything:
 - Hand editing with only a hex editor + the browser: manual section 10 (per-tag download/upload in
   the browser, same-shape swap recipe, ATLAS220 byte-level example), `docs/DONORS.md` (which level
   has which creature), `docs/POOL_HASHES.md` (name -> hash bytes).
+- Shareable spawner reference for non-coders: `scripts/gow2_report.py` builds a self-contained
+  HTML+PDF (per-level encounters, gates, memory, bestiary, proposal form exporting a plan the tool
+  can apply) and `scripts/gow2_render.py` fills it with in-game creature pictures via a headless
+  browser viewer. Manual section 11.
