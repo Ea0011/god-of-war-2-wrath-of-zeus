@@ -437,3 +437,39 @@ pictures just leave an empty bestiary card.
 Level screenshots (`report/renders/levels/<LEVEL>.png`) are not implemented; the same technique
 would apply to a level's root scene node, but levels are large enough that a single screenshot is
 unlikely to read as "where am I" without picking a specific camera per level by hand.
+
+## 12. Summoners
+
+Five creatures summon by calling a level entity **by name** from a spawn action (`tActionSpawn`)
+in their own creature WAD's tweak data. The level entity with that name is a plain spawner (type 9),
+and *it* decides what appears, so the same creature summons different things in different levels:
+
+| creature | calls level entity | shipped examples |
+|---|---|---|
+| Priest10 | `Priest10SpawnEnemy1` | CMBT61-63: Cerbus10, CMBT71-73: Cyclop30, ISLE44: Mintar00, PAL25: Orders10 |
+| Cerbus00 | `Cerpup00AI1` | PAL50: Cerpup00 |
+| Barbking | `Bkarmy00AI1`, `BoatlowAI1` | BOG250 |
+| Colsus00 | `RhodesSoldier01` | RHOD10: the Rhodes soldier it throws |
+| Rock01 | `RockHeadEnt` | ATLAS220 (no creature, an object) |
+
+Porting a summoner into a level that lacks the entity gives a summoner that never summons. The
+summoned creature must also be loaded (RSRCS + pool).
+
+The scan (`scan_summons()` in `gow2_swap_ui.py`, part of "Scan creatures & donor levels") records
+each creature's summon entity names and a copy of each entity from an unmodified shipped level
+(index fields `summons`, `summon_templates`). `apply_plan()` then, for every summoner that will be
+in the level, injects any missing summon entity (`inject_entity()`): the record is appended to an
+existing script, takes uid = `EntityCount` (which then grows by one), borrows the world position of
+an existing spawner, and its `CRT_` is set from plan `summons: {entity: creature}` (default: the
+donor's). The summoned creature then gets RSRCS and a pool through the normal path. Existing summon
+entities are retargeted the same way. ESC tag headers carry no entity count, so appending is safe.
+
+UI: summoner creatures carry a **summoner** badge; summon entities in the encounter list are tagged
+**summoned by X**; the **Summons** card lists each required entity with status (present / will be
+added from LEVEL / missing) and a creature picker, and warns about orphans (summon entity left in a
+level whose summoner was removed, still loading its creature) with a one-click remove. Summoned
+creatures count in the memory card. The report shows the same badges.
+
+Untested in game: whether the summoned creature appears at the summon entity's position or at the
+summoner (the Priest's spawn action plays a ground-spawn effect, which suggests the latter), and the
+meaning of handlers 5 and 16 on the copied entity, which are kept from the donor.

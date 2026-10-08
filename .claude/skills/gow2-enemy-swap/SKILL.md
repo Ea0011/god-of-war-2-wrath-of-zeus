@@ -39,3 +39,6 @@ Quick facts an agent needs before touching anything:
   HTML+PDF (per-level encounters, gates, memory, bestiary, proposal form exporting a plan the tool
   can apply) and `scripts/gow2_render.py` fills it with in-game creature pictures via a headless
   browser viewer. Manual section 11.
+- Summoners (Priest10, Cerbus00, Barbking, Colsus00, Rock01) call a level entity by name; the level
+  entity decides what is summoned. Porting one needs that entity: `apply_plan()` injects it from a
+  shipped template (plan `summons`), the UI's Summons card drives it. Manual section 12.
