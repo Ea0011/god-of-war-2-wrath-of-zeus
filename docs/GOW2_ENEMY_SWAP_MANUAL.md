@@ -470,6 +470,7 @@ added from LEVEL / missing) and a creature picker, and warns about orphans (summ
 level whose summoner was removed, still loading its creature) with a one-click remove. Summoned
 creatures count in the memory card. The report shows the same badges.
 
-Untested in game: whether the summoned creature appears at the summon entity's position or at the
-summoner (the Priest's spawn action plays a ground-spawn effect, which suggests the latter), and the
-meaning of handlers 5 and 16 on the copied entity, which are kept from the donor.
+Confirmed in game (2026-10-08): a Priest ported into a level without the entity summoned once the
+entity was injected this way. Still open: whether the summoned creature appears at the summon
+entity's position or at the summoner, and what handlers 5 and 16 on the copied entity mean (they are
+kept from the donor and did not prevent the summon).
