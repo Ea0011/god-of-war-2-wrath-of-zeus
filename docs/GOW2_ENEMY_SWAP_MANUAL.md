@@ -167,6 +167,12 @@ Rules of thumb for hand edits:
 - RHOD10 lists Orders10 in RSRCS and spawns `CRT_Orders10` twice without a goOrders10 pool.
 - Enemy WAD sizes (payload): R_RHSOLD00 557 KB, R_SATYR10 809 KB, R_ORDERS10 862 KB, R_COLSUS00 3.0 MB.
 - In-game result: RHOD10 Rhsold00 -> Satyr10 (N=16, soldier behaviours -> BRA_Spawn) worked first try.
+- Creatures spawned outside RSRCS/pools: **Pegasus** (all flight levels PEGA10-79 and RHOD50; the
+  levels only carry `WYP_PegasusPath*` waypoints, RHOD50 embeds `GFX_pegasus_*` textures; it behaves
+  like part of the player) and **Barbking** (BOG245, BOG250). RSRCS entries with no spawner, loaded
+  for other reasons: `DeadbFloat00` (PAL43), `SpireBell00` (SPIR10). The tool leaves all of these
+  alone: it only adds creatures the plan introduces and only drops creatures that lost their
+  spawners through the plan. Pegasus has no donor block, so it cannot be placed in other levels.
 
 ## 6. Troubleshooting
 - `no donor pool block known`: scan again or pull a level that uses the creature.
@@ -252,6 +258,20 @@ chain fires on the first destruction event. Use it (a) to progress while testing
 are not firing for that creature at all.
 
 
+### 7.4 Encounter ids and group ids (spawner handlers 5 and 16)
+
+Two constants on every spawner tie it into the level's logic:
+
+- **Handler 16 = group id.** A death sensor (type 3) counts the deaths of creatures from spawners
+  whose handler 16 equals its own handler 6. PEGA50 room: spawners 443, `RoomAI-DestructionSensor1`
+  listens to 443. RHOD10: each starter has its own group (50, 51, 52) and FirstRoomAI is 55.
+- **Handler 5 = encounter id**, one per fight area (PEGA50 room 501, RHOD10 first room 101). A
+  creature spawned under an encounter id the level never activates stands idle: it has a body but
+  no behaviour.
+
+So a gate counts kills per group, and moving a spawner to another group moves its kills to another
+gate. The tool keeps both values when it swaps a creature on a spawner.
+
 ## 8. Memory budget (confirmed in game)
 
 The PS2 build has no slack. Symptoms of running out, in order: effects and secondary attacks
@@ -272,21 +292,24 @@ the creature payload. `R_*.WAD` sizes are in `cache/index.json` (`creatures.<nam
 
 ## 9. Removing enemies
 
-A spawner is removed by making it inert, not by deleting the entity (other entities hold its id
-in their target lists; a dangling id is a crash risk): handler 0 (spawn count) and handler 1
-(alive) are set to 0, and injected (`01 00000000 38 3A`, handler table grows by one row) when the
-spawner has none, as the starters do. Its `CRT_` string is repointed to the most-used creature
-that remains loaded so no lookup can miss. Once no live spawner references a creature it leaves
-RSRCS and its pool block is cut, which frees the creature WAD and the pools.
+A spawner is removed by replacing its creature string `CRT_<Creature>` with the literal string
+`Nothing` (a creature that does not exist): the spawner looks it up, finds nothing, and spawns
+nothing. Confirmed in game (2026-10-10). The entity itself stays, so every target link and entity id
+in other scripts remains valid. Setting the spawn count/alive handlers to 0 does **not** work: the
+spawner still spawned in game, so the tool no longer does that.
 
-Death sensors of an inert spawner never fire, so the `==` total gate must shrink accordingly; the
+The tool and UI treat a spawner that pushes `Nothing` as removed: it stays listed (struck through,
+"removed (Nothing)"), it can be restored by picking a creature (the string goes back to
+`CRT_<Creature>`), and it no longer counts toward RSRCS, pools, memory or the total kill gate.
+Once no live spawner references a creature it leaves RSRCS and its pool block is cut.
+
+Death sensors of a removed spawner never fire, so the `==` total gate must shrink accordingly; the
 UI's "keep the total gate equal to the planned spawn total" option (plan `auto_total`) does that,
 and the consistency line shows the arithmetic. Wave thresholds (`>=`) still need sum <= total.
 
 UI: pick "remove (never spawns)" in a spawner's "replace with" list. CLI/API: plan `remove:
-["tag:entity", ...]`. Verified on RHOD10: removing the three starters and the two Orders10
-spawners drops Orders10 from RSRCS, injects count handlers into the starters, and the total goes
-21 -> 13; the result round-trips byte-exact through the parser.
+["tag:entity", ...]`. Hex edit: overwrite `CRT_<Creature>` with `Nothing` + `00` padding (shorter
+or equal length, so it fits in place; `CRT_Orders10` is 12 bytes, `Nothing` is 7).
 
 ## 10. By hand: hex editor + god_of_war_browser only
 
@@ -360,8 +383,8 @@ Entity layout and the string rule are in 3.4. Practical cases:
 - Gate constants: level-data entities (`WayLevelData1/2`), one `01 <i32> 07 03 vv` per variable;
   RHOD10 file offsets in 7, e.g. total gate `15 00 00 00` at `0xB66CB` of the shipped file.
 - Bypass a condition: overwrite the handler's first 3 bytes with `11 38 3a`.
-- Remove a spawner: count and alive `00 00 00 00`; if the spawner has no handler 0/1 use the tool
-  (it injects the handler) or repoint its `CRT_` to a creature you keep.
+- Remove a spawner: overwrite its `CRT_<Creature>` string with `Nothing` and zero-pad the rest of the
+  old string (count/alive 0 does not stop spawns).
 
 ### 10.4 Finding donor data in the browser
 
@@ -474,3 +497,23 @@ Confirmed in game (2026-10-08) on RHOD20: soldiers replaced by Priest10, `Priest
 injected (uid 89, EntityCount 89 -> 90) and retargeted to Mintar41. The Priest cast its summon and
 the Minotaur appeared where the Priest cast it, not at the entity's borrowed position, so the summon
 entity's world matrix is irrelevant. Handlers 5 and 16 copied from the donor did not prevent it.
+
+Placement matters: put the summon entity in the **summoner's own script**. Each `ESC_*` script
+belongs to a game object, and its entities plausibly only exist while that object is active. In
+PEGA50 an injected `Priest10SpawnEnemy1` landed in `ESC_goplatformfight` (another area) and the Priest
+in `ESC_goroomai` summoned nothing; in RHOD20 it had landed in the Priest's own `ESC_gofightroomai`
+and worked. `apply_plan()` now injects into the script of the first spawner assigned to the
+summoner (shipped levels instead give the entity its own always-present script).
+
+**Summon entities need the summoner's encounter id and their own group id.** Every shipped Priest
+and Cerberus level gives its summon entity the encounter id (handler 5) of the summoner's spawners
+and a separate group id (handler 16), so the summons fight and room sensors don't count them:
+CMBT61 11/2, CMBT71 11/7003, ISLE44 440/4217, PAL25 26/5409, PAL50 8/6018. Copying CMBT61's entity
+into PEGA50 kept encounter 11, which PEGA50 never activates, so the summoned Medusas spawned and
+stood idle. `align_summon_entity()` now sets the summoner's encounter and a fresh unused group on
+every summon entity the tool injects (and repairs copies injected by earlier runs, recognised by
+`is_injected_copy()`); shipped summon entities are never touched, including the Barbarian King's
+army in BOG250, whose different encounter is by design. **Confirmed in game (2026-10-10):** after
+the repair, the summoned Medusas in PEGA50 fought.
+
+

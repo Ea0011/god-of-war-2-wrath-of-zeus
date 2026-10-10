@@ -591,7 +591,7 @@ def cmd_selftest(args):
         ok &= same
         print(f'   WAD object header formula {"OK" if same else "MISMATCH"} (nGO={n_go}, nMem={n_mem})')
         # ESC: re-encode every entity with identity renames (forced) and compare
-        bad = 0; n = 0
+        bad = 0; n = 0; byp = 0
         for t in tags:
             if is_entities_script(t):
                 for e in iter_entities(t.data):
@@ -603,8 +603,12 @@ def cmd_selftest(args):
                         stream = L['stream']
                         ne2, _ = patch_entity(e, {'\0never': ''})
                         if ne != e:
-                            bad += 1
-        print(f'   ESC entities: {n} parsed, {bad} failed to re-encode identically')
+                            hs, ost = entity_handlers(e)
+                            if any(e[ost + st:ost + st + 3] == b'\x11\x38\x3a' for _, st in hs):
+                                byp += 1        # bypassed handler: dead code after the forced exit is not reproduced
+                            else:
+                                bad += 1
+        print(f'   ESC entities: {n} parsed, {bad} failed to re-encode identically' + (f' ({byp} bypassed entities skipped)' if byp else ''))
         ok &= bad == 0
     print('SELFTEST', 'PASSED' if ok else 'FAILED')
     return 0 if ok else 1
@@ -628,8 +632,26 @@ def main():
     sys.exit(args.fn(args) or 0)
 
 
-if __name__ == '__main__':
-    main()
+
+# ============================================================================ spawner creature token
+REMOVED = 'Nothing'      # pushed in place of CRT_<creature> to remove a spawner (confirmed in game)
+
+
+def spawner_token(e, strs=None):
+    """(token string, creature) for a spawner entity: ('CRT_Satyr10','Satyr10'), ('Nothing','Nothing')
+    for a removed spawner, or (None, None) if the entity spawns nothing."""
+    if strs is None:
+        strs = entity_strings(e)[1]
+    for _, x in strs:
+        if x.startswith('CRT_'):
+            return x, x[4:]
+    if u16(e, 0x46) == 9 and any(x == REMOVED for _, x in strs):
+        return REMOVED, REMOVED
+    return None, None
+
+
+def creature_token(c):
+    return REMOVED if c == REMOVED else 'CRT_' + c
 
 
 # ============================================================================ plan API (used by UI)
@@ -654,11 +676,11 @@ def level_info(tags):
             for e in iter_entities(t.data):
                 name, strs, _ = entity_strings(e)
                 ss = [s for _, s in strs]
-                crt = [s[4:] for s in ss if s.startswith('CRT_')]
+                tok, cr = spawner_token(e, strs)
                 bra = [s for s in ss if s.startswith('BRA_')]
-                if crt:
+                if cr:
                     c = sc.get((i, name), {})
-                    ents.append(dict(name=name, crt=crt[0], bra=sorted(set(bra)), count=c.get('count'), alive=c.get('alive')))
+                    ents.append(dict(name=name, crt=cr, removed=cr == REMOVED, bra=sorted(set(bra)), count=c.get('count'), alive=c.get('alive')))
             if ents:
                 encounters.append(dict(tag=i, script=t.name, entities=ents))
     return dict(rsrcs=names, creatures=creatures, encounters=encounters, gates=level_gates(tags), gate_report=gate_report(tags),
@@ -673,15 +695,23 @@ def apply_plan(tags, plan, creature_db, log=print):
     assign = {(int(a), b): v for (a, b), v in assign.items()}
     # --- summoners: make sure every summoner that will be in the level has its summon entities
     summons_plan = dict(plan.get('summons', {}))
-    level_crts = set()
+    level_crts, summoner_host = set(), {}
     for i0, t0 in enumerate(tags):
         if is_entities_script(t0):
             for e0 in iter_entities(t0.data):
                 nm0, st0, _ = entity_strings(e0)
-                cr0 = [x[4:] for _, x in st0 if x.startswith('CRT_')]
+                _, cr0 = spawner_token(e0, st0)
                 if cr0:
-                    level_crts.add(assign.get((i0, nm0), cr0[0]))
-    for summoner in sorted(level_crts):
+                    pc = assign.get((i0, nm0), cr0)
+                    level_crts.add(pc)
+                    summoner_host.setdefault(pc, i0)          # first script that spawns this creature
+    planned_summoners = {v for v in assign.values()} & level_crts   # only summoners this plan places; shipped ones keep their design
+    for summoner in level_crts - planned_summoners:                   # ...plus summon entities an earlier run injected
+        for ent, tpl in ((creature_db.get(summoner) or {}).get('summon_templates') or {}).items():
+            hit = find_entity(tags, ent)
+            if hit and is_injected_copy(hit[1], bytes.fromhex(tpl['entity'])):
+                planned_summoners.add(summoner)
+    for summoner in sorted(planned_summoners):
         for ent in (creature_db.get(summoner) or {}).get('summons', []):
             if find_entity(tags, ent):
                 continue
@@ -689,7 +719,11 @@ def apply_plan(tags, plan, creature_db, log=print):
             if not tpl:
                 log(f'WARNING: {summoner} calls {ent} but no donor template is known; its summon will not work')
                 continue
-            inject_entity(tags, bytes.fromhex(tpl['entity']), crt=summons_plan.get(ent), log=log)
+            inject_entity(tags, bytes.fromhex(tpl['entity']), crt=summons_plan.get(ent), log=log,
+                          host_tag=summoner_host.get(summoner))   # same script as the summoner: active whenever it is
+    for summoner in sorted(planned_summoners):
+        for ent in (creature_db.get(summoner) or {}).get('summons', []):
+            align_summon_entity(tags, ent, summoner, assign, log=log)
     for ent, crt in summons_plan.items():          # retarget existing summon entities
         hit = find_entity(tags, ent)
         if hit:
@@ -702,17 +736,21 @@ def apply_plan(tags, plan, creature_db, log=print):
     extra = dict(plan.get('renames', {}))
 
     # usage after assignment, and which creatures each replacement stands in for
-    usage, replaces = {}, {}
+    usage, replaces, baseline = {}, {}, set()
     for i, t in enumerate(tags):
         if is_entities_script(t):
             for e in iter_entities(t.data):
                 name, strs, _ = entity_strings(e)
-                crt = [s[4:] for _, s in strs if s.startswith('CRT_')]
-                if crt and (i, name) not in removed_set:
-                    cur = assign.get((i, name), crt[0])
+                _, cr = spawner_token(e, strs)
+                if cr and cr != REMOVED:
+                    baseline.add(cr.lower())             # spawned before the plan (some are loaded outside RSRCS)
+                if cr and (i, name) not in removed_set:
+                    cur = assign.get((i, name), cr)
+                    if cur == REMOVED:
+                        continue
                     usage[cur] = usage.get(cur, 0) + 1
-                    if cur != crt[0]:
-                        replaces.setdefault(cur, set()).add(crt[0])
+                    if cur != cr and cr != REMOVED:
+                        replaces.setdefault(cur, set()).add(cr)
     r = find_tag(tags, 'RSRCS')
     names = rsrcs_names(r) if r else []
     KNOWN_CREATURES.update(n.lower() for n in names)
@@ -737,9 +775,11 @@ def apply_plan(tags, plan, creature_db, log=print):
                 counts[c] = max(blk['n'], min(max(n_old), demand))
     # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
     # (e.g. Orders10 in the shipped RHOD10) once spawners are pointed at them
-    added = [c for c in usage if c not in names or
+    lower_names = {n.lower() for n in names}
+    added = [c for c in usage if (c.lower() not in lower_names and c.lower() not in baseline) or
              (c in replaces and enemy_block(pools0, c)[0] is None and creature_db.get(c, {}).get('block'))]
-    removed = [c for c in names if c not in usage] if plan.get('remove_unused', True) else []
+    lower_usage = {u.lower() for u in usage}
+    removed = [c for c in names if c.lower() in baseline and c.lower() not in lower_usage] if plan.get('remove_unused', True) else []
 
     for c in removed:
         go, mem = enemy_block(dc.pools(), c)
@@ -773,13 +813,10 @@ def apply_plan(tags, plan, creature_db, log=print):
         r.data = rsrcs_build(names)
     log(f'RSRCS: {names}')
 
-    if removed_keys:
-        disable_spawners(tags, removed_keys, log=log)
-        live = [c for c in names if usage.get(c)]
-        survivor = max(live, key=lambda c: usage[c]) if live else None   # most-used creature, never a one-off boss
-        if survivor:
-            for (i, name) in removed_set:
-                assign[(i, name)] = survivor     # keeps the CRT_ lookup valid while count is 0
+    for key in removed_set:
+        assign[key] = REMOVED                    # CRT_<creature> -> "Nothing": the spawner finds no creature
+    if removed_set:
+        log(f'removed {len(removed_set)} spawner(s): creature string set to "{REMOVED}"')
     total = 0
     for i, t in enumerate(tags):
         if not is_entities_script(t):
@@ -788,12 +825,12 @@ def apply_plan(tags, plan, creature_db, log=print):
         for e in iter_entities(t.data):
             name, strs, _ = entity_strings(e)
             ss = [s for _, s in strs]
-            crt = [s[4:] for s in ss if s.startswith('CRT_')]
+            tok, cr = spawner_token(e, strs)
             ren = dict(extra)
-            if crt and (i, name) in assign and assign[(i, name)] != crt[0]:
+            if cr and (i, name) in assign and assign[(i, name)] != cr:
                 new = assign[(i, name)]
-                ren[f'CRT_{crt[0]}'] = f'CRT_{new}'
-                avail = set(creature_db.get(new, {}).get('bra') or [])
+                ren[tok] = creature_token(new)
+                avail = set(creature_db.get(new, {}).get('bra') or []) if new != REMOVED else set()
                 for b in ss:
                     if b.startswith('BRA_') and avail and b not in avail:
                         ren[b] = fallback
@@ -967,9 +1004,10 @@ def spawner_counts(tags):
         epos = 0x24
         for e in iter_entities(t.data):
             name, strs, _ = entity_strings(e)
-            if any(s.startswith('CRT_') for _, s in strs):
+            tok, cr = spawner_token(e, strs)
+            if cr:
                 ch = entity_const_handlers(e)
-                res[(ti, name)] = dict(count=ch.get(0, (None, None))[0], alive=ch.get(1, (None, None))[0],
+                res[(ti, name)] = dict(removed=cr == REMOVED, count=ch.get(0, (None, None))[0], alive=ch.get(1, (None, None))[0],
                                        off_count=epos + ch[0][1] if 0 in ch else None,
                                        off_alive=epos + ch[1][1] if 1 in ch else None)
             epos += len(e)
@@ -1021,6 +1059,8 @@ def gate_report(tags, spawns_override=None):
         members = [(k, v) for k, v in sc.items() if k[0] in scripts]
         total = 0
         for (ti, name), v in members:
+            if v.get('removed'):
+                continue
             ov = (spawns_override or {}).get(f'{ti}:{name}', {})
             c = ov.get('count', v['count'])
             total += c if c is not None else 1
@@ -1094,7 +1134,7 @@ def add_const_handler(e, hid, value):
 
 
 def disable_spawners(tags, keys, log=print):
-    """Make spawners never spawn: handler 0 (count) and 1 (alive) set to 0, injected if missing."""
+    """SUPERSEDED (count 0 does not stop spawns in game; apply_plan uses the "Nothing" token). Make spawners never spawn: handler 0 (count) and 1 (alive) set to 0, injected if missing."""
     want = {}
     for k in keys:
         ti, name = k.split(':', 1); want.setdefault(int(ti), set()).add(name)
@@ -1143,14 +1183,90 @@ def find_entity(tags, name):
     return None
 
 
-def inject_entity(tags, entity, crt=None, log=print):
+def level_group_ids(tags):
+    """All group ids in use: spawner handler 16 and death-sensor handler 6."""
+    ids = set()
+    for t in tags:
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                c = entity_const_handlers(e)
+                for h in (6, 16):
+                    if h in c:
+                        ids.add(c[h][0])
+    return ids
+
+
+def is_injected_copy(e, template):
+    """True if e is a copy of template made by inject_entity (same body; position and/or uid changed),
+    as opposed to the shipped entity itself or an unrelated entity of the same name."""
+    if e == template:
+        return False                          # the shipped template entity in its own level
+    def body(x):
+        x = bytearray(x); x[0:0x40] = bytes(0x40); x[0x48:0x4A] = b'\0\0'
+        return bytes(x)
+    if body(e) == body(template):
+        return True
+    _, strs, _ = entity_strings(e)            # also catch a retargeted copy (CRT_ string changed)
+    _, tstrs, _ = entity_strings(template)
+    return [h for h, _ in entity_handlers(e)[0]] == [h for h, _ in entity_handlers(template)[0]] and \
+        entity_const_handlers(e).get(5) is not None and \
+        entity_const_handlers(e)[5][0] == entity_const_handlers(template).get(5, (None,))[0] and \
+        entity_const_handlers(e).get(16, (None,))[0] == entity_const_handlers(template).get(16, (None,))[0] and e[0:0x40] != template[0:0x40]
+
+
+def align_summon_entity(tags, ent, summoner, assign, log=print):
+    """Give a summon entity the encounter id (handler 5) of its summoner's spawner and its own unused
+    group id (handler 16), as every shipped Priest/Cerberus level does. A foreign encounter id leaves the
+    summoned creatures idle (PEGA50); a group shared with the summoner would make room sensors count them."""
+    hit = find_entity(tags, ent)
+    if not hit:
+        return False
+    enc = None
+    for ti, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                nm, st, _ = entity_strings(e)
+                _, cr = spawner_token(e, st)
+                if cr and assign.get((ti, nm), cr) == summoner and nm != ent:
+                    enc = entity_const_handlers(e).get(5, (None, None))[0]
+                    break
+        if enc is not None:
+            break
+    ti, e = hit
+    c = entity_const_handlers(e)
+    if enc is None or 5 not in c:
+        return False
+    if c[5][0] == enc:
+        return False                          # already aligned (all shipped levels): leave untouched
+    want16 = c[16][0] if 16 in c else None
+    new16 = max(level_group_ids(tags)) + 1    # own, unused group: room sensors do not count summons
+    data = bytearray(tags[ti].data)
+    pos = 0x24
+    for x in iter_entities(tags[ti].data):
+        if entity_strings(x)[0] == ent:
+            break
+        pos += len(x)
+    struct.pack_into('<i', data, pos + c[5][1], enc)
+    if 16 in c:
+        struct.pack_into('<i', data, pos + c[16][1], new16)
+    tags[ti].data = bytes(data)
+    log(f'summon entity {ent}: encounter {c[5][0]} -> {enc} (from {summoner}), group {want16} -> {new16}')
+    return True
+
+
+def inject_entity(tags, entity, crt=None, log=print, host_tag=None):
     """Append a copied entity record to the level. It gets a fresh uid (= EntityCount), the
     level's EntityCount grows by one, its position is taken from an existing spawner of the
     host script, and optionally its CRT_ string is repointed. Returns (tag index, name)."""
     ec = next(t for t in tags if t.tag == 0)
     name = entity_strings(entity)[0]
     host = None
-    for ti, t in enumerate(tags):            # host: first script that has a creature spawner
+    if host_tag is not None:
+        e0 = next((e for e in iter_entities(tags[host_tag].data) if spawner_token(e)[1]), None) or next(iter_entities(tags[host_tag].data))
+        host = (host_tag, e0)
+    for ti, t in enumerate(tags):            # fallback host: first script that has a creature spawner
+        if host:
+            break
         if is_entities_script(t):
             for e in iter_entities(t.data):
                 if any(s.startswith('CRT_') for _, s in entity_strings(e)[1]):
@@ -1173,3 +1289,7 @@ def inject_entity(tags, entity, crt=None, log=print):
     ec.size = uid + 1
     log(f'summon entity {name} added to {tags[ti].name} as uid {uid}' + (f', spawns {crt}' if crt else '') + f'; EntityCount {uid} -> {uid + 1}')
     return ti, name
+
+
+if __name__ == '__main__':
+    main()
