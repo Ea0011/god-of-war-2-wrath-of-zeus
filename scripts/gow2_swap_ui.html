@@ -17,12 +17,18 @@ th{font-weight:600;color:var(--mut);font-size:12px}td.enc{background:color-mix(i
 pre{background:color-mix(in srgb,var(--line) 30%,transparent);padding:10px;border-radius:6px;overflow:auto;max-height:320px;font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap}
 .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:1px 8px;font-size:12px;margin:1px}
 .changed{outline:2px solid var(--acc);outline-offset:-2px}tr.removed td{opacity:.55;text-decoration:line-through}tr.removed td:last-child{text-decoration:none;opacity:1}
+.card{min-width:0}main{grid-template-columns:minmax(0,1fr)}
+.tabs button.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.tw{overflow-x:auto}.tw table{width:auto}.tw td,.tw th{padding:3px 4px;white-space:nowrap}.tw input{width:70px;padding:3px 4px;font:12px ui-monospace,monospace}
+.tw .hash{font:11px ui-monospace,monospace;color:var(--ok)}.tw .hex{font:11px ui-monospace,monospace;color:var(--mut)}.tw .mem{font-size:10px;color:var(--warn)}
+.tw input.shipdiff{border-color:var(--warn)}
 </style></head><body>
 <header><h1>GoW2 enemy swap</h1>
+ <span class="tabs row"><button id="tabLevels" class="on">Levels</button><button id="tabTuning">Tuning</button></span>
  <span id="st" class="mut">checking browser…</span>
  <button id="scan">Scan creatures &amp; donor levels</button><span id="scanst" class="mut"></span>
 </header>
-<main>
+<main id="levelsView">
 <div class="card row">
  <label>Level <select id="level"><option>loading…</option></select></label>
  <button id="load">Load</button><button id="reload" title="re-download from the ISO">Re-download</button>
@@ -60,6 +66,21 @@ pre{background:color-mix(in srgb,var(--line) 30%,transparent);padding:10px;borde
  <span id="bk" class="mut"></span>
 </div>
 <div class="card"><b>Log</b><pre id="log">—</pre></div>
+</main>
+<main id="tuningView" hidden>
+<div class="card row">
+ <b>Global tuning (R_PERMA.WAD → GBL_Global)</b>
+ <button id="tLoad">Re-download</button><span id="tInfo" class="mut"></span>
+</div>
+<div class="card"><span class="warn">R_PERMA is loaded for the whole game: these values apply to every level.</span>
+ <span class="mut">Values are unnamed 4-byte words (c0, c1 …). Notes under each table are observations from the data, not confirmed meanings: change one value, test in game, and keep notes. Edited cells are outlined; amber borders mark values that already differ from the shipped file.</span></div>
+<div id="tTables"></div>
+<div class="card row" id="tActions">
+ <button id="tPreview">Preview changes</button><button id="tWrite">Write R_PERMA.mod.WAD only</button>
+ <button id="tUpload" class="primary">Apply &amp; upload into ISO</button><button id="tRestore">Restore R_PERMA from backup</button>
+ <button id="tReset">Reset edits</button><span id="tBk" class="mut"></span>
+</div>
+<div class="card"><b>Log</b><pre id="tLog">—</pre></div>
 </main>
 <script>
 const $=s=>document.querySelector(s);let LEVEL=null,INFO=null,DB={},ASSIGN={},COUNTS={},GATES={},SPAWNS={},BYPASS=new Set(),SUMMONS={};
@@ -142,4 +163,33 @@ $('#preview').onclick=()=>run('/api/preview',{},'preview');$('#apply').onclick=(
 $('#upload').onclick=()=>{if(confirm(`Write ${LEVEL} into the ISO? The original is backed up on first upload.`))run('/api/apply',{upload:true},'apply+upload');};
 $('#restore').onclick=()=>{if(confirm(`Restore original ${LEVEL} into the ISO?`))run('/api/restore',{},'restore');};
 status();levels();loadDB().catch(()=>{});
+
+let TUN=null,TEDITS={};
+const tlog=m=>{const p=$('#tLog');p.textContent=(p.textContent==='—'?'':p.textContent+'\n')+m;p.scrollTop=p.scrollHeight;};
+function showTab(t){$('#levelsView').hidden=t!=='levels';$('#tuningView').hidden=t!=='tuning';$('#tabLevels').classList.toggle('on',t==='levels');$('#tabTuning').classList.toggle('on',t==='tuning');if(t==='tuning'&&!TUN)loadTuning(false);}
+async function loadTuning(force){$('#tInfo').textContent='downloading R_PERMA…';try{TUN=await api('/api/tuning'+(force?'?force=1':''));$('#tInfo').textContent='sha256 '+TUN.sha256.slice(0,12);$('#tBk').textContent=TUN.backup?'backup: '+TUN.backup:'no backup yet (saved on first upload)';renderTuning();}catch(e){tlog('load failed: '+e.message)}}
+function cellHtml(w){if(w.kind==='hash')return `<span class="hash">#${w.value}</span>`;if(w.kind==='hex')return `<span class="hex">${w.value}</span>`;
+ const cur=TEDITS[w.off]??w.value;const sd=w.shipped!==undefined&&w.shipped!==null&&String(w.shipped)!==String(w.value);
+ return `<input data-off="${w.off}" data-kind="${w.kind}" value="${cur}" class="${TEDITS[w.off]!==undefined?'changed':''} ${sd?'shipdiff':''}" title="${w.kind}${sd?' · shipped: '+w.shipped:''} · GBL+0x${w.off.toString(16)}">`;}
+function renderTuning(){let h='';for(const g of TUN.tables){const ncol=Math.max(...g.entries.map(e=>e.words.length));
+ const mem=[];for(let c=0;c<ncol;c++){const m=g.entries.map(e=>(e.words[c]||{}).member).find(x=>x);mem.push(m||'');}
+ h+=`<div class="card"><div class="row"><b>${g.label}</b><span class="mut">${g.entries.length} entries · ${g.member}</span></div>${g.note?`<div class="mut" style="margin:4px 0">${g.note}</div>`:''}<div class="tw"><table>`;
+ h+='<tr><th></th>'+Array.from({length:ncol},(_,c)=>`<th>c${c}${mem[c]?`<br><span class="mem">${mem[c]}</span>`:''}</th>`).join('')+'</tr>';
+ for(const e of g.entries)h+=`<tr><th title="${e.stage}">${e.label}</th>`+Array.from({length:ncol},(_,c)=>`<td>${e.words[c]?cellHtml(e.words[c]):''}</td>`).join('')+'</tr>';
+ h+='</table></div></div>';}
+ $('#tTables').innerHTML=h;
+ $('#tTables').querySelectorAll('input[data-off]').forEach(i=>i.onchange=()=>{const off=+i.dataset.off;const w=findWord(off);const v=i.value.trim();
+  if(v===''||isNaN(+v)){i.value=TEDITS[off]??w.value;return;}if(w.kind==='int'&&!/^-?\d+$/.test(v)){tlog(`GBL+0x${off.toString(16)} is an integer; use a whole number`);i.value=TEDITS[off]??w.value;return;}
+  if(+v===+w.value)delete TEDITS[off];else TEDITS[off]=+v;i.classList.toggle('changed',TEDITS[off]!==undefined);$('#tInfo').textContent=`sha256 ${TUN.sha256.slice(0,12)} · ${Object.keys(TEDITS).length} edit(s)`;});}
+function findWord(off){for(const g of TUN.tables)for(const e of g.entries)for(const w of e.words)if(w.off===off)return w;}
+function describeEdits(){return Object.entries(TEDITS).map(([o,v])=>{for(const g of TUN.tables)for(const e of g.entries){const c=e.words.findIndex(w=>w.off==o);if(c>=0)return `${g.label} · ${e.label} · c${c}: ${e.words[c].value} → ${v}`;}return o;});}
+async function tRun(upload){const n=Object.keys(TEDITS).length;if(!n){tlog('no edits');return;}tlog(`--- ${upload?'apply + upload':'write'} (${n} edit(s))`);describeEdits().forEach(l=>tlog('  '+l));
+ document.querySelectorAll('#tActions button').forEach(b=>b.disabled=true);
+ try{const r=await api('/api/tuning/apply',{edits:TEDITS,upload});(r.log||[]).forEach(l=>tlog('  '+l));if(r.uploaded!==undefined){tlog(r.uploaded?'UPLOADED and verified. Stop the browser before launching the game.':'upload verification FAILED');if(r.uploaded){TEDITS={};await loadTuning(true);}}}
+ catch(e){tlog('ERROR: '+e.message)}finally{document.querySelectorAll('#tActions button').forEach(b=>b.disabled=false);}}
+$('#tabLevels').onclick=()=>showTab('levels');$('#tabTuning').onclick=()=>showTab('tuning');
+$('#tLoad').onclick=()=>{TEDITS={};loadTuning(true);};$('#tReset').onclick=()=>{TEDITS={};renderTuning();tlog('edits cleared');};
+$('#tPreview').onclick=()=>{const l=describeEdits();tlog(l.length?'--- pending edits\n  '+l.join('\n  '):'no edits');};
+$('#tWrite').onclick=()=>tRun(false);$('#tUpload').onclick=()=>{if(confirm('Write R_PERMA.WAD into the ISO? It applies to the whole game. The original is backed up on first upload.'))tRun(true);};
+$('#tRestore').onclick=async()=>{if(!confirm('Restore the shipped R_PERMA.WAD into the ISO?'))return;try{const r=await api('/api/restore',{name:'R_PERMA.WAD',plan:{}});tlog(r.restored?'restored original R_PERMA':'restore failed: '+r.response);TEDITS={};await loadTuning(true);}catch(e){tlog('ERROR: '+e.message)}};
 </script></body></html>

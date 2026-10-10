@@ -46,3 +46,6 @@ Quick facts an agent needs before touching anything:
 - Spawner handler 16 = group id (a death sensor counts the group matching its handler 6); handler 5 =
   encounter id (a creature under an encounter the level never activates stands idle). Injected summon
   entities take the summoner's encounter and their own fresh group. Manual 7.4 and 12.
+- Global tuning (difficulty multipliers, per-level magic / sub-weapon / Blades tables, costumes) is
+  R_PERMA's `GBL_Global`; arrays are `(rel_offset<<12)|count`. `gow2_tuning.py`, `gow2_dc_dump.py` and
+  the UI Tuning tab read/edit it. Column meanings unconfirmed; upgrade costs not found. Manual 13.
