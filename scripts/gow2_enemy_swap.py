@@ -705,7 +705,13 @@ def apply_plan(tags, plan, creature_db, log=print):
                     pc = assign.get((i0, nm0), cr0)
                     level_crts.add(pc)
                     summoner_host.setdefault(pc, i0)          # first script that spawns this creature
-    for summoner in sorted(level_crts):
+    planned_summoners = {v for v in assign.values()} & level_crts   # only summoners this plan places; shipped ones keep their design
+    for summoner in level_crts - planned_summoners:                   # ...plus summon entities an earlier run injected
+        for ent, tpl in ((creature_db.get(summoner) or {}).get('summon_templates') or {}).items():
+            hit = find_entity(tags, ent)
+            if hit and is_injected_copy(hit[1], bytes.fromhex(tpl['entity'])):
+                planned_summoners.add(summoner)
+    for summoner in sorted(planned_summoners):
         for ent in (creature_db.get(summoner) or {}).get('summons', []):
             if find_entity(tags, ent):
                 continue
@@ -715,6 +721,9 @@ def apply_plan(tags, plan, creature_db, log=print):
                 continue
             inject_entity(tags, bytes.fromhex(tpl['entity']), crt=summons_plan.get(ent), log=log,
                           host_tag=summoner_host.get(summoner))   # same script as the summoner: active whenever it is
+    for summoner in sorted(planned_summoners):
+        for ent in (creature_db.get(summoner) or {}).get('summons', []):
+            align_summon_entity(tags, ent, summoner, assign, log=log)
     for ent, crt in summons_plan.items():          # retarget existing summon entities
         hit = find_entity(tags, ent)
         if hit:
@@ -727,12 +736,14 @@ def apply_plan(tags, plan, creature_db, log=print):
     extra = dict(plan.get('renames', {}))
 
     # usage after assignment, and which creatures each replacement stands in for
-    usage, replaces = {}, {}
+    usage, replaces, baseline = {}, {}, set()
     for i, t in enumerate(tags):
         if is_entities_script(t):
             for e in iter_entities(t.data):
                 name, strs, _ = entity_strings(e)
                 _, cr = spawner_token(e, strs)
+                if cr and cr != REMOVED:
+                    baseline.add(cr.lower())             # spawned before the plan (some are loaded outside RSRCS)
                 if cr and (i, name) not in removed_set:
                     cur = assign.get((i, name), cr)
                     if cur == REMOVED:
@@ -764,9 +775,11 @@ def apply_plan(tags, plan, creature_db, log=print):
                 counts[c] = max(blk['n'], min(max(n_old), demand))
     # creatures that need a pool block: new ones, and ones listed in RSRCS without any pool
     # (e.g. Orders10 in the shipped RHOD10) once spawners are pointed at them
-    added = [c for c in usage if c not in names or
+    lower_names = {n.lower() for n in names}
+    added = [c for c in usage if (c.lower() not in lower_names and c.lower() not in baseline) or
              (c in replaces and enemy_block(pools0, c)[0] is None and creature_db.get(c, {}).get('block'))]
-    removed = [c for c in names if c not in usage] if plan.get('remove_unused', True) else []
+    lower_usage = {u.lower() for u in usage}
+    removed = [c for c in names if c.lower() in baseline and c.lower() not in lower_usage] if plan.get('remove_unused', True) else []
 
     for c in removed:
         go, mem = enemy_block(dc.pools(), c)
@@ -1168,6 +1181,77 @@ def find_entity(tags, name):
                 if entity_strings(e)[0] == name:
                     return ti, e
     return None
+
+
+def level_group_ids(tags):
+    """All group ids in use: spawner handler 16 and death-sensor handler 6."""
+    ids = set()
+    for t in tags:
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                c = entity_const_handlers(e)
+                for h in (6, 16):
+                    if h in c:
+                        ids.add(c[h][0])
+    return ids
+
+
+def is_injected_copy(e, template):
+    """True if e is a copy of template made by inject_entity (same body; position and/or uid changed),
+    as opposed to the shipped entity itself or an unrelated entity of the same name."""
+    if e == template:
+        return False                          # the shipped template entity in its own level
+    def body(x):
+        x = bytearray(x); x[0:0x40] = bytes(0x40); x[0x48:0x4A] = b'\0\0'
+        return bytes(x)
+    if body(e) == body(template):
+        return True
+    _, strs, _ = entity_strings(e)            # also catch a retargeted copy (CRT_ string changed)
+    _, tstrs, _ = entity_strings(template)
+    return [h for h, _ in entity_handlers(e)[0]] == [h for h, _ in entity_handlers(template)[0]] and \
+        entity_const_handlers(e).get(5) is not None and \
+        entity_const_handlers(e)[5][0] == entity_const_handlers(template).get(5, (None,))[0] and \
+        entity_const_handlers(e).get(16, (None,))[0] == entity_const_handlers(template).get(16, (None,))[0] and e[0:0x40] != template[0:0x40]
+
+
+def align_summon_entity(tags, ent, summoner, assign, log=print):
+    """Give a summon entity the encounter id (handler 5) of its summoner's spawner and its own unused
+    group id (handler 16), as every shipped Priest/Cerberus level does. A foreign encounter id leaves the
+    summoned creatures idle (PEGA50); a group shared with the summoner would make room sensors count them."""
+    hit = find_entity(tags, ent)
+    if not hit:
+        return False
+    enc = None
+    for ti, t in enumerate(tags):
+        if is_entities_script(t):
+            for e in iter_entities(t.data):
+                nm, st, _ = entity_strings(e)
+                _, cr = spawner_token(e, st)
+                if cr and assign.get((ti, nm), cr) == summoner and nm != ent:
+                    enc = entity_const_handlers(e).get(5, (None, None))[0]
+                    break
+        if enc is not None:
+            break
+    ti, e = hit
+    c = entity_const_handlers(e)
+    if enc is None or 5 not in c:
+        return False
+    if c[5][0] == enc:
+        return False                          # already aligned (all shipped levels): leave untouched
+    want16 = c[16][0] if 16 in c else None
+    new16 = max(level_group_ids(tags)) + 1    # own, unused group: room sensors do not count summons
+    data = bytearray(tags[ti].data)
+    pos = 0x24
+    for x in iter_entities(tags[ti].data):
+        if entity_strings(x)[0] == ent:
+            break
+        pos += len(x)
+    struct.pack_into('<i', data, pos + c[5][1], enc)
+    if 16 in c:
+        struct.pack_into('<i', data, pos + c[16][1], new16)
+    tags[ti].data = bytes(data)
+    log(f'summon entity {ent}: encounter {c[5][0]} -> {enc} (from {summoner}), group {want16} -> {new16}')
+    return True
 
 
 def inject_entity(tags, entity, crt=None, log=print, host_tag=None):

@@ -43,3 +43,6 @@ Quick facts an agent needs before touching anything:
   entity decides what is summoned. Porting one needs that entity: `apply_plan()` injects it from a
   shipped template (plan `summons`) into the summoner's own script (another area's script did not work), the UI's
   Summons card drives it. Manual section 12.
+- Spawner handler 16 = group id (a death sensor counts the group matching its handler 6); handler 5 =
+  encounter id (a creature under an encounter the level never activates stands idle). Injected summon
+  entities take the summoner's encounter and their own fresh group. Manual 7.4 and 12.

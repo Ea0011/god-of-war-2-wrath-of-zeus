@@ -252,6 +252,20 @@ chain fires on the first destruction event. Use it (a) to progress while testing
 are not firing for that creature at all.
 
 
+### 7.4 Encounter ids and group ids (spawner handlers 5 and 16)
+
+Two constants on every spawner tie it into the level's logic:
+
+- **Handler 16 = group id.** A death sensor (type 3) counts the deaths of creatures from spawners
+  whose handler 16 equals its own handler 6. PEGA50 room: spawners 443, `RoomAI-DestructionSensor1`
+  listens to 443. RHOD10: each starter has its own group (50, 51, 52) and FirstRoomAI is 55.
+- **Handler 5 = encounter id**, one per fight area (PEGA50 room 501, RHOD10 first room 101). A
+  creature spawned under an encounter id the level never activates stands idle: it has a body but
+  no behaviour.
+
+So a gate counts kills per group, and moving a spawner to another group moves its kills to another
+gate. The tool keeps both values when it swaps a creature on a spawner.
+
 ## 8. Memory budget (confirmed in game)
 
 The PS2 build has no slack. Symptoms of running out, in order: effects and secondary attacks
@@ -484,4 +498,15 @@ PEGA50 an injected `Priest10SpawnEnemy1` landed in `ESC_goplatformfight` (anothe
 in `ESC_goroomai` summoned nothing; in RHOD20 it had landed in the Priest's own `ESC_gofightroomai`
 and worked. `apply_plan()` now injects into the script of the first spawner assigned to the
 summoner (shipped levels instead give the entity its own always-present script).
+
+**Summon entities need the summoner's encounter id and their own group id.** Every shipped Priest
+and Cerberus level gives its summon entity the encounter id (handler 5) of the summoner's spawners
+and a separate group id (handler 16), so the summons fight and room sensors don't count them:
+CMBT61 11/2, CMBT71 11/7003, ISLE44 440/4217, PAL25 26/5409, PAL50 8/6018. Copying CMBT61's entity
+into PEGA50 kept encounter 11, which PEGA50 never activates, so the summoned Medusas spawned and
+stood idle. `align_summon_entity()` now sets the summoner's encounter and a fresh unused group on
+every summon entity the tool injects (and repairs copies injected by earlier runs, recognised by
+`is_injected_copy()`); shipped summon entities are never touched, including the Barbarian King's
+army in BOG250, whose different encounter is by design.
+
 
