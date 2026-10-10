@@ -272,21 +272,24 @@ the creature payload. `R_*.WAD` sizes are in `cache/index.json` (`creatures.<nam
 
 ## 9. Removing enemies
 
-A spawner is removed by making it inert, not by deleting the entity (other entities hold its id
-in their target lists; a dangling id is a crash risk): handler 0 (spawn count) and handler 1
-(alive) are set to 0, and injected (`01 00000000 38 3A`, handler table grows by one row) when the
-spawner has none, as the starters do. Its `CRT_` string is repointed to the most-used creature
-that remains loaded so no lookup can miss. Once no live spawner references a creature it leaves
-RSRCS and its pool block is cut, which frees the creature WAD and the pools.
+A spawner is removed by replacing its creature string `CRT_<Creature>` with the literal string
+`Nothing` (a creature that does not exist): the spawner looks it up, finds nothing, and spawns
+nothing. Confirmed in game (2026-10-10). The entity itself stays, so every target link and entity id
+in other scripts remains valid. Setting the spawn count/alive handlers to 0 does **not** work: the
+spawner still spawned in game, so the tool no longer does that.
 
-Death sensors of an inert spawner never fire, so the `==` total gate must shrink accordingly; the
+The tool and UI treat a spawner that pushes `Nothing` as removed: it stays listed (struck through,
+"removed (Nothing)"), it can be restored by picking a creature (the string goes back to
+`CRT_<Creature>`), and it no longer counts toward RSRCS, pools, memory or the total kill gate.
+Once no live spawner references a creature it leaves RSRCS and its pool block is cut.
+
+Death sensors of a removed spawner never fire, so the `==` total gate must shrink accordingly; the
 UI's "keep the total gate equal to the planned spawn total" option (plan `auto_total`) does that,
 and the consistency line shows the arithmetic. Wave thresholds (`>=`) still need sum <= total.
 
 UI: pick "remove (never spawns)" in a spawner's "replace with" list. CLI/API: plan `remove:
-["tag:entity", ...]`. Verified on RHOD10: removing the three starters and the two Orders10
-spawners drops Orders10 from RSRCS, injects count handlers into the starters, and the total goes
-21 -> 13; the result round-trips byte-exact through the parser.
+["tag:entity", ...]`. Hex edit: overwrite `CRT_<Creature>` with `Nothing` + `00` padding (shorter
+or equal length, so it fits in place; `CRT_Orders10` is 12 bytes, `Nothing` is 7).
 
 ## 10. By hand: hex editor + god_of_war_browser only
 
@@ -360,8 +363,8 @@ Entity layout and the string rule are in 3.4. Practical cases:
 - Gate constants: level-data entities (`WayLevelData1/2`), one `01 <i32> 07 03 vv` per variable;
   RHOD10 file offsets in 7, e.g. total gate `15 00 00 00` at `0xB66CB` of the shipped file.
 - Bypass a condition: overwrite the handler's first 3 bytes with `11 38 3a`.
-- Remove a spawner: count and alive `00 00 00 00`; if the spawner has no handler 0/1 use the tool
-  (it injects the handler) or repoint its `CRT_` to a creature you keep.
+- Remove a spawner: overwrite its `CRT_<Creature>` string with `Nothing` and zero-pad the rest of the
+  old string (count/alive 0 does not stop spawns).
 
 ### 10.4 Finding donor data in the browser
 
@@ -474,3 +477,11 @@ Confirmed in game (2026-10-08) on RHOD20: soldiers replaced by Priest10, `Priest
 injected (uid 89, EntityCount 89 -> 90) and retargeted to Mintar41. The Priest cast its summon and
 the Minotaur appeared where the Priest cast it, not at the entity's borrowed position, so the summon
 entity's world matrix is irrelevant. Handlers 5 and 16 copied from the donor did not prevent it.
+
+Placement matters: put the summon entity in the **summoner's own script**. Each `ESC_*` script
+belongs to a game object, and its entities plausibly only exist while that object is active. In
+PEGA50 an injected `Priest10SpawnEnemy1` landed in `ESC_goplatformfight` (another area) and the Priest
+in `ESC_goroomai` summoned nothing; in RHOD20 it had landed in the Priest's own `ESC_gofightroomai`
+and worked. `apply_plan()` now injects into the script of the first spawner assigned to the
+summoner (shipped levels instead give the entity its own always-present script).
+

@@ -29,9 +29,9 @@ Quick facts an agent needs before touching anything:
 - Memory is the first suspect for "it spawned but does not do X" and for TLB misses: keep the
   creature WAD payload at or below the shipped level (UI Memory card, manual section 8). Confirmed:
   Medusa beamed only once the level went from +30% to -2% of the shipped budget.
-- Removing an enemy = spawner count/alive set to 0 (injected if absent) + CRT repointed to a
-  surviving creature; never delete entities. Creature then drops out of RSRCS/pools automatically;
-  total gate must follow (`auto_total`). Manual section 9.
+- Removing an enemy = replace its `CRT_<Creature>` string with `Nothing` (confirmed in game; count/alive 0
+  does NOT stop spawns). Entity stays, links stay valid; creature drops out of RSRCS/pools; total gate
+  must follow (`auto_total`). Manual section 9.
 - Hand editing with only a hex editor + the browser: manual section 10 (per-tag download/upload in
   the browser, same-shape swap recipe, ATLAS220 byte-level example), `docs/DONORS.md` (which level
   has which creature), `docs/POOL_HASHES.md` (name -> hash bytes).
@@ -41,4 +41,5 @@ Quick facts an agent needs before touching anything:
   browser viewer. Manual section 11.
 - Summoners (Priest10, Cerbus00, Barbking, Colsus00, Rock01) call a level entity by name; the level
   entity decides what is summoned. Porting one needs that entity: `apply_plan()` injects it from a
-  shipped template (plan `summons`), the UI's Summons card drives it. Manual section 12.
+  shipped template (plan `summons`) into the summoner's own script (another area's script did not work), the UI's
+  Summons card drives it. Manual section 12.
