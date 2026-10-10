@@ -513,6 +513,7 @@ into PEGA50 kept encounter 11, which PEGA50 never activates, so the summoned Med
 stood idle. `align_summon_entity()` now sets the summoner's encounter and a fresh unused group on
 every summon entity the tool injects (and repairs copies injected by earlier runs, recognised by
 `is_injected_copy()`); shipped summon entities are never touched, including the Barbarian King's
-army in BOG250, whose different encounter is by design.
+army in BOG250, whose different encounter is by design. **Confirmed in game (2026-10-10):** after
+the repair, the summoned Medusas in PEGA50 fought.
 
 
