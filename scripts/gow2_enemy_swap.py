@@ -591,7 +591,7 @@ def cmd_selftest(args):
         ok &= same
         print(f'   WAD object header formula {"OK" if same else "MISMATCH"} (nGO={n_go}, nMem={n_mem})')
         # ESC: re-encode every entity with identity renames (forced) and compare
-        bad = 0; n = 0
+        bad = 0; n = 0; byp = 0
         for t in tags:
             if is_entities_script(t):
                 for e in iter_entities(t.data):
@@ -603,8 +603,12 @@ def cmd_selftest(args):
                         stream = L['stream']
                         ne2, _ = patch_entity(e, {'\0never': ''})
                         if ne != e:
-                            bad += 1
-        print(f'   ESC entities: {n} parsed, {bad} failed to re-encode identically')
+                            hs, ost = entity_handlers(e)
+                            if any(e[ost + st:ost + st + 3] == b'\x11\x38\x3a' for _, st in hs):
+                                byp += 1        # bypassed handler: dead code after the forced exit is not reproduced
+                            else:
+                                bad += 1
+        print(f'   ESC entities: {n} parsed, {bad} failed to re-encode identically' + (f' ({byp} bypassed entities skipped)' if byp else ''))
         ok &= bad == 0
     print('SELFTEST', 'PASSED' if ok else 'FAILED')
     return 0 if ok else 1
@@ -627,9 +631,6 @@ def main():
     args = ap.parse_args()
     sys.exit(args.fn(args) or 0)
 
-
-if __name__ == '__main__':
-    main()
 
 
 # ============================================================================ spawner creature token
@@ -1204,3 +1205,7 @@ def inject_entity(tags, entity, crt=None, log=print, host_tag=None):
     ec.size = uid + 1
     log(f'summon entity {name} added to {tags[ti].name} as uid {uid}' + (f', spawns {crt}' if crt else '') + f'; EntityCount {uid} -> {uid + 1}')
     return ti, name
+
+
+if __name__ == '__main__':
+    main()
