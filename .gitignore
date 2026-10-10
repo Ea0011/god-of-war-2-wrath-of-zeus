@@ -12,6 +12,8 @@
 !/scripts/stop_swap_ui.sh
 !/scripts/gow2_report.py
 !/scripts/gow2_render.py
+!/scripts/gow2_dc_dump.py
+!/scripts/gow2_tuning.py
 !/scripts/setup.sh
 !/.claude/
 /.claude/*

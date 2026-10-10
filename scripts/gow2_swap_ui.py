@@ -13,6 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import gow2_enemy_swap as G  # noqa: E402
+import gow2_tuning as T  # noqa: E402
 
 CACHE = os.path.join(ROOT, 'cache'); WADS = os.path.join(CACHE, 'wads')
 OUT = os.path.join(ROOT, 'out'); BACKUPS = os.path.join(ROOT, 'backups')
@@ -248,6 +249,47 @@ def level_apply(name, plan, upload):
     return res
 
 
+PERM = 'R_PERMA.WAD'
+
+
+def tuning_load(force=False):
+    p = fetch_wad(PERM, force)
+    tags = G.read_wad(p)
+    tables = T.read_tables(tags)
+    bk = os.path.join(BACKUPS, PERM + '.orig')
+    if os.path.exists(bk):                      # mark words that differ from the shipped file
+        ship = {w['off']: w['value'] for g in T.read_tables(G.read_wad(bk)) for e in g['entries'] for w in e['words']}
+        for g in tables:
+            for e in g['entries']:
+                for w in e['words']:
+                    w['shipped'] = ship.get(w['off'])
+    return dict(tables=tables, backup=bk if os.path.exists(bk) else None,
+                sha256=hashlib.sha256(open(p, 'rb').read()).hexdigest())
+
+
+def tuning_apply(edits, upload):
+    log = []
+    p = fetch_wad(PERM)
+    tags = G.read_wad(p)
+    n = T.apply_edits(tags, edits, log=log.append)
+    data = G.write_wad(tags)
+    outp = os.path.join(OUT, 'R_PERMA.mod.WAD'); open(outp, 'wb').write(data)
+    sha = hashlib.sha256(data).hexdigest()
+    log.append(f'{n} value(s) changed; wrote {outp} ({len(data)} bytes)')
+    res = dict(output=outp, sha256=sha, log=log)
+    if upload:
+        bk = os.path.join(BACKUPS, PERM + '.orig')
+        if not os.path.exists(bk):
+            open(bk, 'wb').write(open(p, 'rb').read()); log.append(f'backup saved: {bk}')
+        r = upload_wad(PERM, data); back = bget(f'/dump/pack/{PERM}')
+        ok = hashlib.sha256(back).hexdigest() == sha
+        log.append('readback ' + ('matches' if ok else 'DOES NOT MATCH') + ' the uploaded file')
+        if ok:
+            open(p, 'wb').write(data)
+        res['uploaded'] = ok
+    return res
+
+
 def level_restore(name):
     bk = os.path.join(BACKUPS, name + '.orig')
     if not os.path.exists(bk):
@@ -292,6 +334,8 @@ class H(BaseHTTPRequestHandler):
                 self._json(names)
             elif u.path == '/api/creatures':
                 self._json(creature_db(q.get('level', [None])[0]))
+            elif u.path == '/api/tuning':
+                self._json(tuning_load(force=q.get('force', ['0'])[0] == '1'))
             elif u.path == '/api/level':
                 self._json(level_load(q['name'][0], force=q.get('force', ['0'])[0] == '1'))
             else:
@@ -313,6 +357,8 @@ class H(BaseHTTPRequestHandler):
                 res['log'] = log; res['budget'] = b; res['wad_bytes'] = len(G.write_wad(tags)); self._json(res)
             elif self.path == '/api/apply':
                 self._json(level_apply(body['name'], body['plan'], bool(body.get('upload'))))
+            elif self.path == '/api/tuning/apply':
+                self._json(tuning_apply(body.get('edits', {}), bool(body.get('upload'))))
             elif self.path == '/api/restore':
                 self._json(level_restore(body['name']))
             else:

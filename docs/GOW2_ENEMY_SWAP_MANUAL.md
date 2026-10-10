@@ -516,4 +516,37 @@ every summon entity the tool injects (and repairs copies injected by earlier run
 army in BOG250, whose different encounter is by design. **Confirmed in game (2026-10-10):** after
 the repair, the summoned Medusas in PEGA50 fought.
 
+## 13. Global tuning: difficulty, magic, weapons (R_PERMA GBL_Global)
 
+Magic and weapon WADs (`R_M_*`, `R_WEAPON<id>_<0-5>`) carry no tuning data. Kratos' move tree lives
+in R_HERO00's `DC_WAD_R_Hero` (380 KB: moves `MOV_*`, scripts `SCR_*`, 353 `tActionMeterAdjust`
+nodes of shape {meter id, ?, float amount, flags}); `ATT_*` objects there are weapon
+*attachments*, not attack tables. The global per-level tables are in **R_PERMA.WAD**, top-level
+object **`GBL_Global`** of `DC_WAD_R_Perm`.
+
+Array members of `GBL_Global` store `(relative_offset << 12) | count`, the offset measured from the
+member's own address:
+
+| member | entries | what varies |
+|---|---|---|
+| Difficulty | 4 (Mortal, Spartan, God, Titan, by order) | 14 multipliers; c0 2/1/1/0.75 (likely damage dealt), c1 0.5/1/2.5/5 (likely damage taken) |
+| Weapon | 6 Blades levels | c4 1/1.5/2/2.5/3 (trail intensity?) |
+| Medusa | 3 | L2 adds the flash, L3 the bomb; c3 100/200/300 |
+| Earth | 3 | c0 20/25/30; 100/500 -> 250/750 |
+| Electric | 3 | c1 10/12.5/16.5, c5 200/300/400, c4 260/168/76 |
+| Wind | 3 | bow gust/tornado/tempest impulses per level |
+| Hammer, Bone, Olympus | 3 each | Hammer c0 1/1.75/3; Bone c4 10/15/20 |
+| Costume | 17 | multiplier rows (0.25-5) |
+
+Column meanings are **observations, not confirmed**. Upgrade red-orb costs were not found in
+R_PERMA or R_HERO under any recognisable name (likely menu code or the executable); magic costs
+are not yet pinned down (candidates: the per-level first columns above, or meter adjusts in the
+magic moves).
+
+Tools: `scripts/gow2_dc_dump.py WAD [--object NAME] [--follow]` dumps any WAD's DC objects with
+decoded words and resolved arrays; `scripts/gow2_tuning.py dump|set` reads and edits the
+`GBL_Global` tables; the UI's **Tuning** tab edits them per difficulty / level / costume, writes
+`out/R_PERMA.mod.WAD`, uploads with a backup, and marks values that differ from the shipped file.
+Edits overwrite 4-byte words in place (floats stay floats, ints stay ints; a stored 0 takes its
+kind from the same column in the other entries), so the file size never changes. R_PERMA applies
+to the whole game.
