@@ -167,6 +167,12 @@ Rules of thumb for hand edits:
 - RHOD10 lists Orders10 in RSRCS and spawns `CRT_Orders10` twice without a goOrders10 pool.
 - Enemy WAD sizes (payload): R_RHSOLD00 557 KB, R_SATYR10 809 KB, R_ORDERS10 862 KB, R_COLSUS00 3.0 MB.
 - In-game result: RHOD10 Rhsold00 -> Satyr10 (N=16, soldier behaviours -> BRA_Spawn) worked first try.
+- Creatures spawned outside RSRCS/pools: **Pegasus** (all flight levels PEGA10-79 and RHOD50; the
+  levels only carry `WYP_PegasusPath*` waypoints, RHOD50 embeds `GFX_pegasus_*` textures; it behaves
+  like part of the player) and **Barbking** (BOG245, BOG250). RSRCS entries with no spawner, loaded
+  for other reasons: `DeadbFloat00` (PAL43), `SpireBell00` (SPIR10). The tool leaves all of these
+  alone: it only adds creatures the plan introduces and only drops creatures that lost their
+  spawners through the plan. Pegasus has no donor block, so it cannot be placed in other levels.
 
 ## 6. Troubleshooting
 - `no donor pool block known`: scan again or pull a level that uses the creature.
